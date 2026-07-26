@@ -30,3 +30,10 @@ While reporting a Codex Rudder SIGTERM smoke in zsh, assigning to the ordinary-l
 
 A later Codex Rudder live smoke reused a /tmp prompt path from an earlier session, but the temporary file had already been cleaned, causing the run to fail before state creation. Recreate or validate temp artifacts immediately before each smoke instead of treating /tmp paths as durable.
 
+## 2026-07-26T08:14:33.136Z — codex — gpt-5.6-sol
+
+- **Directory:** `/Users/safzan/Development/projects/codex-rudder`
+- **Tags:** `tooling`, `github-connector`
+
+While opening a draft PR for the private codex-rudder repository, the GitHub connector returned a 404 after an authenticated git push succeeded. The connector likely lacks access to this private repo; falling back to the authenticated gh CLI worked around it.
+
