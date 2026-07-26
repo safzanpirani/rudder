@@ -58,6 +58,19 @@ func TestControlSocketLocationIsPrivateAndLengthSafe(t *testing.T) {
 	}
 }
 
+func TestControlCleanupDoesNotRemoveUnownedSocketPath(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, ".rudder.sock")
+	if err := os.WriteFile(socketPath, []byte("not a socket"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := &controller{store: &stateStore{state: runState{SocketPath: socketPath}}}
+	r.closeControlServer()
+	if _, err := os.Stat(socketPath); err != nil {
+		t.Fatalf("cleanup removed unowned socket path: %v", err)
+	}
+}
+
 func TestStateDoesNotPersistPromptText(t *testing.T) {
 	dir := t.TempDir()
 	promptPath := filepath.Join(dir, "prompt.md")
@@ -90,6 +103,37 @@ func TestStateDoesNotPersistPromptText(t *testing.T) {
 	}
 }
 
+func TestLogOpenFailurePersistsTerminalState(t *testing.T) {
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.md")
+	stateDir := filepath.Join(dir, "run")
+	if err := os.WriteFile(promptPath, []byte("task"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, "events.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := runController(runConfig{
+		CWD:            dir,
+		PromptFile:     promptPath,
+		StateDir:       stateDir,
+		Model:          "test-model",
+		Sandbox:        "read-only",
+		ApprovalPolicy: "never",
+		ChildCommand:   []string{"unused"},
+	})
+	if err == nil {
+		t.Fatal("run unexpectedly succeeded")
+	}
+	state, readErr := readState(stateDir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if state.Status != "failed" || state.CompletedAt.IsZero() {
+		t.Fatalf("log-open failure left non-terminal state: %#v", state)
+	}
+}
+
 func TestOneLineAndFlattenStrings(t *testing.T) {
 	got := oneLine("hello\n  world", 20)
 	if got != "hello world" {
@@ -98,6 +142,29 @@ func TestOneLineAndFlattenStrings(t *testing.T) {
 	got = flattenStrings([]any{map[string]any{"text": "first"}, "second"})
 	if got != "first second" {
 		t.Fatalf("flattenStrings = %q", got)
+	}
+}
+
+func TestRPCIDAcceptsStringAndIntegerIDs(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		want string
+		ok   bool
+	}{
+		{name: "string", raw: `"rudder-1"`, want: "rudder-1", ok: true},
+		{name: "integer", raw: `42`, want: "42", ok: true},
+		{name: "negative integer", raw: `-7`, want: "-7", ok: true},
+		{name: "empty string", raw: `""`},
+		{name: "float", raw: `1.5`},
+		{name: "null", raw: `null`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := rpcID(json.RawMessage(test.raw))
+			if ok != test.ok || got != test.want {
+				t.Fatalf("rpcID(%s) = %q, %v; want %q, %v", test.raw, got, ok, test.want, test.ok)
+			}
+		})
 	}
 }
 
@@ -236,6 +303,91 @@ func TestInterruptPreservesInterruptedStatus(t *testing.T) {
 	}
 	if state.Status != "interrupted" {
 		t.Fatalf("status = %q, want interrupted", state.Status)
+	}
+}
+
+func TestInterruptAcknowledgementForcesLocalTeardown(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.md")
+	stateDir := filepath.Join(dir, "run")
+	if err := os.WriteFile(promptPath, []byte("stay active"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDER_INTERRUPT_ACK_ONLY", "1")
+	grandchildPIDFile := filepath.Join(dir, "grandchild.pid")
+	if runtime.GOOS != "windows" {
+		t.Setenv("GO_WANT_RUDDER_GRANDCHILD_PID_FILE", grandchildPIDFile)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runControllerContext(ctx, runConfig{
+			CWD:            dir,
+			PromptFile:     promptPath,
+			StateDir:       stateDir,
+			Model:          "test-model",
+			Sandbox:        "read-only",
+			ApprovalPolicy: "never",
+			ChildCommand:   []string{os.Args[0], "-test.run=TestInterruptAcknowledgementForcesLocalTeardown"},
+		})
+	}()
+
+	activeState := waitForRunStatus(t, stateDir, "active")
+	grandchildPID := 0
+	if runtime.GOOS != "windows" {
+		rawPID, err := os.ReadFile(grandchildPIDFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		grandchildPID, err = strconv.Atoi(strings.TrimSpace(string(rawPID)))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	response, err := sendControl(stateDir, controlRequest{Command: "interrupt"}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK {
+		t.Fatalf("interrupt failed: %s", response.Error)
+	}
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "interrupted") {
+			t.Fatalf("unexpected interrupted run result: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-errCh
+		t.Fatal("acknowledged interrupt did not stop the local controller")
+	}
+	finalState, err := readState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalState.Status != "interrupted" {
+		t.Fatalf("status = %q, want interrupted", finalState.Status)
+	}
+	if processAlive(activeState.ChildPID) {
+		t.Fatalf("child pid %d is still alive", activeState.ChildPID)
+	}
+	if grandchildPID != 0 {
+		deadline := time.Now().Add(2 * time.Second)
+		for processAlive(grandchildPID) && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if processAlive(grandchildPID) {
+			t.Fatalf("grandchild pid %d is still alive", grandchildPID)
+		}
+	}
+	if _, err := os.Lstat(activeState.SocketPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("socket still exists or cannot be checked: %v", err)
 	}
 }
 
@@ -870,6 +1022,169 @@ func TestRunPreservesAgentMessagesAndRedactsPersistedError(t *testing.T) {
 	}
 }
 
+func TestChildCommandTraceDoesNotPersistArguments(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.md")
+	stateDir := filepath.Join(dir, "run")
+	if err := os.WriteFile(promptPath, []byte("complete"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDER_COMPLETE_ON_START", "1")
+	const secretArgument = "TOP-SECRET-BEARER-TOKEN"
+	err := runController(runConfig{
+		CWD:            dir,
+		PromptFile:     promptPath,
+		StateDir:       stateDir,
+		Model:          "test-model",
+		Sandbox:        "read-only",
+		ApprovalPolicy: "never",
+		ChildCommand:   []string{os.Args[0], "-test.run=TestChildCommandTraceDoesNotPersistArguments", secretArgument},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace, err := os.ReadFile(filepath.Join(stateDir, "trace.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(trace, []byte(secretArgument)) {
+		t.Fatalf("trace persisted child argument: %s", trace)
+	}
+	if !bytes.Contains(trace, []byte("[start] child pid=")) {
+		t.Fatalf("trace omitted child startup marker: %s", trace)
+	}
+}
+
+func TestRunDoesNotReportSuccessWhenStatePersistenceFails(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.md")
+	stateDir := filepath.Join(dir, "run")
+	if err := os.WriteFile(promptPath, []byte("stay active"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runControllerContext(ctx, runConfig{
+			CWD:            dir,
+			PromptFile:     promptPath,
+			StateDir:       stateDir,
+			Model:          "test-model",
+			Sandbox:        "read-only",
+			ApprovalPolicy: "never",
+			ChildCommand:   []string{os.Args[0], "-test.run=TestRunDoesNotReportSuccessWhenStatePersistenceFails"},
+		})
+	}()
+
+	waitForRunStatus(t, stateDir, "active")
+	createBlockingDirectory(t, filepath.Join(stateDir, stateFileName+".tmp"))
+	_, _ = sendControl(stateDir, controlRequest{Command: "steer", Text: "finish now"}, time.Second)
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "persist") {
+			t.Fatalf("run result = %v, want persistence failure", err)
+		}
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-errCh
+		t.Fatal("run did not stop after state persistence failed")
+	}
+	persisted, err := readState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != "active" {
+		t.Fatalf("partially persisted status = %q, want prior durable active state", persisted.Status)
+	}
+}
+
+func TestRunFailsWhenAgentOutputCannotBePersisted(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.md")
+	stateDir := filepath.Join(dir, "run")
+	if err := os.WriteFile(promptPath, []byte("stay active"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runControllerContext(ctx, runConfig{
+			CWD:            dir,
+			PromptFile:     promptPath,
+			StateDir:       stateDir,
+			Model:          "test-model",
+			Sandbox:        "read-only",
+			ApprovalPolicy: "never",
+			ChildCommand:   []string{os.Args[0], "-test.run=TestRunFailsWhenAgentOutputCannotBePersisted"},
+		})
+	}()
+
+	waitForRunStatus(t, stateDir, "active")
+	if err := os.Mkdir(filepath.Join(stateDir, "output.md.tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = sendControl(stateDir, controlRequest{Command: "steer", Text: "finish now"}, time.Second)
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "persist agent output") {
+			t.Fatalf("run result = %v, want output persistence failure", err)
+		}
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-errCh
+		t.Fatal("run did not stop after output persistence failed")
+	}
+	state, err := readState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != "failed" {
+		t.Fatalf("status = %q, want failed", state.Status)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "output.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("output.md unexpectedly exists or cannot be checked: %v", err)
+	}
+}
+
+func createBlockingDirectory(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		err := os.Mkdir(path, 0o700)
+		if err == nil {
+			return
+		}
+		if !errors.Is(err, os.ErrExist) {
+			t.Fatal(err)
+		}
+		info, statErr := os.Stat(path)
+		if statErr == nil && info.IsDir() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("atomic state writer did not release %s", path)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func waitForRunStatus(t *testing.T, stateDir, want string) runState {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -1000,6 +1315,9 @@ func runHelperAppServer() {
 			_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": "turn-test", "status": "completed"}}})
 		case "turn/interrupt":
 			_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{}})
+			if os.Getenv("GO_WANT_RUDDER_INTERRUPT_ACK_ONLY") == "1" {
+				continue
+			}
 			_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": "turn-test", "status": "interrupted"}}})
 		default:
 			if request.ID != "" {
