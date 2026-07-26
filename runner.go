@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -105,7 +106,9 @@ func runControllerContext(ctx context.Context, cfg runConfig) error {
 		waitCh:   make(chan error, 1),
 		readDone: make(chan struct{}),
 	}
+	defer r.closeControlServer()
 	if err := r.openLogs(); err != nil {
+		r.fail(err)
 		return err
 	}
 	defer r.closeLogs()
@@ -130,7 +133,6 @@ func runControllerContext(ctx context.Context, cfg runConfig) error {
 		r.fail(err)
 		return err
 	}
-	defer r.closeControlServer()
 
 	if err := r.initialize(string(prompt)); err != nil {
 		if ctx.Err() != nil {
@@ -249,16 +251,28 @@ func (r *controller) startChild() error {
 	}
 	r.childIn, err = r.child.StdinPipe()
 	if err != nil {
+		_ = childOut.Close()
 		return err
 	}
 	r.child.Stderr = r.stderr
 	if err := r.child.Start(); err != nil {
+		_ = childOut.Close()
+		_ = r.childIn.Close()
 		return err
 	}
-	_ = r.store.update(func(state *runState) { state.ChildPID = r.child.Process.Pid })
-	r.tracef("[start] child pid=%d command=%s", r.child.Process.Pid, strings.Join(r.cfg.ChildCommand, " "))
 	go r.readChild(childOut)
 	go func() { r.waitCh <- r.child.Wait() }()
+	if err := r.store.update(func(state *runState) { state.ChildPID = r.child.Process.Pid }); err != nil {
+		r.stopChild.Store(true)
+		r.shutdownChild()
+		return fmt.Errorf("persist child pid: %w", err)
+	}
+	r.tracef(
+		"[start] child pid=%d executable=%s args=%d",
+		r.child.Process.Pid,
+		filepath.Base(r.cfg.ChildCommand[0]),
+		len(r.cfg.ChildCommand)-1,
+	)
 	return nil
 }
 
@@ -271,7 +285,9 @@ func (r *controller) initialize(prompt string) error {
 	if err != nil {
 		return err
 	}
-	_ = r.store.update(func(state *runState) { state.ThreadID = threadID })
+	if err := r.store.update(func(state *runState) { state.ThreadID = threadID }); err != nil {
+		return fmt.Errorf("persist thread id: %w", err)
+	}
 	r.tracef("[thread] %s %s", mode, threadID)
 
 	turnParams := map[string]any{
@@ -296,12 +312,14 @@ func (r *controller) initialize(prompt string) error {
 	if turnResult.Turn.ID == "" {
 		return errors.New("turn/start returned no turn id")
 	}
-	_ = r.store.update(func(state *runState) {
+	if err := r.store.update(func(state *runState) {
 		state.TurnID = turnResult.Turn.ID
 		if !terminalStatus(state.Status) {
 			state.Status = "active"
 		}
-	})
+	}); err != nil {
+		return fmt.Errorf("persist active turn: %w", err)
+	}
 	r.tracef("[turn] active thread=%s turn=%s", threadID, turnResult.Turn.ID)
 	return nil
 }
@@ -511,11 +529,23 @@ func rpcID(raw json.RawMessage) (string, bool) {
 	if len(raw) == 0 {
 		return "", false
 	}
-	var value string
-	if err := json.Unmarshal(raw, &value); err != nil {
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
 		return "", false
 	}
-	return value, value != ""
+	switch typed := value.(type) {
+	case string:
+		return typed, typed != ""
+	case json.Number:
+		if _, err := strconv.ParseInt(typed.String(), 10, 64); err != nil {
+			return "", false
+		}
+		return typed.String(), true
+	default:
+		return "", false
+	}
 }
 
 func (r *controller) handleServerMessage(message rpcEnvelope) {
@@ -531,12 +561,17 @@ func (r *controller) handleServerMessage(message rpcEnvelope) {
 			} `json:"turn"`
 		}
 		_ = json.Unmarshal(message.Params, &params)
-		_ = r.store.update(func(state *runState) {
+		if err := r.store.update(func(state *runState) {
 			state.TurnID = params.Turn.ID
 			if !terminalStatus(state.Status) {
 				state.Status = "active"
 			}
-		})
+		}); err != nil {
+			r.stopChild.Store(true)
+			r.fail(fmt.Errorf("persist started turn: %w", err))
+			terminateProcessTree(r.child, false)
+			return
+		}
 		r.tracef("[turn] started %s", params.Turn.ID)
 	case "turn/completed":
 		r.handleTurnCompleted(message.Params)
@@ -622,7 +657,10 @@ func (r *controller) handleItem(method string, raw json.RawMessage) {
 			text, _ := params.Item["text"].(string)
 			if text != "" {
 				if err := r.recordAgentMessage(text); err != nil {
-					r.tracef("[warn] write output: %v", err)
+					r.stopChild.Store(true)
+					r.fail(fmt.Errorf("persist agent output: %w", err))
+					terminateProcessTree(r.child, false)
+					return
 				}
 				r.tracef("[say] %s", oneLine(text, 240))
 			}
@@ -637,16 +675,18 @@ func (r *controller) handleItem(method string, raw json.RawMessage) {
 func (r *controller) finish(status, errText string) {
 	r.doneOnce.Do(func() {
 		if errText != "" {
-			r.resultMu.Lock()
-			r.resultError = errText
-			r.resultMu.Unlock()
+			r.appendResultError(errText)
 			r.tracef("[error] %s", oneLine(errText, 500))
 		}
-		_ = r.store.update(func(state *runState) {
+		if err := r.store.update(func(state *runState) {
 			state.Status = status
 			state.Error = redactedStateError(status, errText)
 			state.CompletedAt = time.Now().UTC()
-		})
+		}); err != nil {
+			persistErr := fmt.Sprintf("persist terminal state: %v", err)
+			r.appendResultError(persistErr)
+			r.tracef("[error] %s", oneLine(persistErr, 500))
+		}
 		r.tracef("[turn] %s", status)
 		close(r.done)
 	})
@@ -664,6 +704,16 @@ func (r *controller) privateResultError() string {
 	r.resultMu.Lock()
 	defer r.resultMu.Unlock()
 	return r.resultError
+}
+
+func (r *controller) appendResultError(errText string) {
+	r.resultMu.Lock()
+	defer r.resultMu.Unlock()
+	if r.resultError == "" {
+		r.resultError = errText
+		return
+	}
+	r.resultError += "; " + errText
 }
 
 func redactedStateError(status, errText string) string {
@@ -712,8 +762,8 @@ func (r *controller) closeControlServer() {
 	state := r.store.snapshot()
 	if r.listener != nil {
 		_ = r.listener.Close()
+		_ = os.Remove(state.SocketPath)
 	}
-	_ = os.Remove(state.SocketPath)
 	if state.SocketDir != "" {
 		_ = os.Remove(state.SocketDir)
 	}

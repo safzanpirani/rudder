@@ -39,7 +39,8 @@ func (r *controller) startControlServer() error {
 		return err
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
-		listener.Close()
+		_ = listener.Close()
+		_ = os.Remove(path)
 		return err
 	}
 	r.listener = listener
@@ -141,7 +142,13 @@ func (r *controller) steer(text string) error {
 	if result.TurnID != state.TurnID {
 		return fmt.Errorf("app-server acknowledged unexpected turn %s", result.TurnID)
 	}
-	_ = r.store.update(func(current *runState) { current.Steers++ })
+	if err := r.store.update(func(current *runState) { current.Steers++ }); err != nil {
+		persistErr := fmt.Errorf("persist steer count: %w", err)
+		r.stopChild.Store(true)
+		r.fail(persistErr)
+		terminateProcessTree(r.child, false)
+		return persistErr
+	}
 	r.tracef("[steer] accepted for turn %s: %s", state.TurnID, oneLine(text, 180))
 	return nil
 }
@@ -151,10 +158,24 @@ func (r *controller) interrupt() error {
 	if state.Status != "active" || state.ThreadID == "" || state.TurnID == "" {
 		return fmt.Errorf("turn is not active: status=%s", state.Status)
 	}
-	return r.call("turn/interrupt", map[string]any{
+	rpcErr := r.call("turn/interrupt", map[string]any{
 		"threadId": state.ThreadID,
 		"turnId":   state.TurnID,
 	}, nil, 30*time.Second)
+	r.stopChild.Store(true)
+	if rpcErr != nil {
+		r.tracef("[warn] turn/interrupt failed; forcing local teardown: %v", rpcErr)
+	}
+	r.finish("interrupted", "")
+	terminateProcessTree(r.child, false)
+	finalState := r.store.snapshot()
+	if finalState.Status == "interrupted" {
+		return nil
+	}
+	if resultErr := r.privateResultError(); resultErr != "" {
+		return errors.New(resultErr)
+	}
+	return rpcErr
 }
 
 func sendControl(stateDir string, request controlRequest, timeout time.Duration) (controlResponse, error) {

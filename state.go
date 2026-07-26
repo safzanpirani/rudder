@@ -116,9 +116,14 @@ func processAlive(pid int) bool {
 func (s *stateStore) update(fn func(*runState)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	fn(&s.state)
-	s.state.UpdatedAt = time.Now().UTC()
-	return s.persistLocked()
+	next := s.state
+	fn(&next)
+	next.UpdatedAt = time.Now().UTC()
+	if err := persistState(s.path, next); err != nil {
+		return err
+	}
+	s.state = next
+	return nil
 }
 
 func (s *stateStore) snapshot() runState {
@@ -128,19 +133,23 @@ func (s *stateStore) snapshot() runState {
 }
 
 func (s *stateStore) persistLocked() error {
-	raw, err := json.MarshalIndent(s.state, "", "  ")
+	return persistState(s.path, s.state)
+}
+
+func persistState(path string, state runState) error {
+	raw, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
 	raw = append(raw, '\n')
-	tmp := s.path + ".tmp"
+	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return err
 	}
 	if err := os.Chmod(tmp, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	return os.Rename(tmp, path)
 }
 
 func readState(stateDir string) (runState, error) {
