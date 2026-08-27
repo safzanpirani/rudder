@@ -20,6 +20,7 @@ const maxControlSocketPathBytes = 100
 
 type runState struct {
 	Version     int       `json:"version"`
+	Provider    string    `json:"provider"`
 	PID         int       `json:"pid"`
 	ChildPID    int       `json:"childPid,omitempty"`
 	Status      string    `json:"status"`
@@ -50,6 +51,11 @@ type stateStore struct {
 }
 
 func newStateStore(cfg runConfig) (*stateStore, error) {
+	provider, err := normalizeProvider(cfg.Provider)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Provider = provider
 	stateDir, err := filepath.Abs(cfg.StateDir)
 	if err != nil {
 		return nil, err
@@ -75,7 +81,8 @@ func newStateStore(cfg runConfig) (*stateStore, error) {
 	store := &stateStore{
 		path: filepath.Join(stateDir, stateFileName),
 		state: runState{
-			Version:    1,
+			Version:    2,
+			Provider:   cfg.Provider,
 			PID:        os.Getpid(),
 			Status:     "starting",
 			Model:      cfg.Model,
@@ -88,7 +95,7 @@ func newStateStore(cfg runConfig) (*stateStore, error) {
 			EventsPath: filepath.Join(stateDir, "events.jsonl"),
 			TracePath:  filepath.Join(stateDir, "trace.log"),
 			OutputPath: filepath.Join(stateDir, "output.md"),
-			StderrPath: filepath.Join(stateDir, "app-server.stderr.log"),
+			StderrPath: filepath.Join(stateDir, "provider.stderr.log"),
 			StartedAt:  now,
 			UpdatedAt:  now,
 		},
@@ -98,6 +105,9 @@ func newStateStore(cfg runConfig) (*stateStore, error) {
 			_ = os.RemoveAll(socketDir)
 		}
 		return nil, err
+	}
+	if cfg.RegisterRun {
+		_ = registerRunStateDir(stateDir)
 	}
 	return store, nil
 }
@@ -164,6 +174,9 @@ func readState(stateDir string) (runState, error) {
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return runState{}, err
 	}
+	if state.Provider == "" {
+		state.Provider = providerCodex
+	}
 	return state, nil
 }
 
@@ -178,7 +191,7 @@ func controlSocketLocation(stateDir string) (string, string, error) {
 		roots = append(roots, "/tmp")
 	}
 	for _, root := range roots {
-		privateDir, err := os.MkdirTemp(root, "codex-rudder-")
+		privateDir, err := os.MkdirTemp(root, "rudder-")
 		if err != nil {
 			continue
 		}

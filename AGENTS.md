@@ -131,8 +131,8 @@ relevant subcommand parser.
 
 ## Git and release hygiene
 
-The canonical remote is `origin` at the private GitHub repository
-`safzanpirani/codex-rudder`; the default branch is `main`. Do not change
+The canonical remote is `origin` at the public GitHub repository
+`safzanpirani/rudder`; the default branch is `main`. Do not change
 visibility, add collaborators, publish releases, or push tags unless the user
 asks. Never commit private broker URLs, secret-file contents, session
 transcripts, or local run artifacts.

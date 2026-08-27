@@ -1,36 +1,76 @@
-# Codex Rudder
+# Rudder
 
-Live steering for long-running Codex tasks.
+**Change your mind while the agent is still working.**
+
+Rudder is a small CLI that keeps a live handle on long-running Codex and Claude
+Code sessions. Watch a turn as it runs, and redirect it mid-flight — no waiting
+for it to finish, no killing it and starting over.
+
+![rudder in action](demo/rudder-demo.gif)
+
+```bash
+rudder run --prompt-file task.md --state-dir run &   # start a turn
+rudder peek --state-dir run                          # watch it think
+rudder steer --state-dir run "tests first, skip the benchmark"
+rudder tui                                           # every session, live
+```
+
+## Why?
 
 `codex exec --json` is observable but its stdin is already closed after the
-initial prompt. Codex Rudder instead owns a `codex app-server` connection and
-exposes a small local control socket. A second command can call `turn/steer`
-while the same turn is still running.
+initial prompt. Once a turn is running, your only options are to wait or to
+kill it. Both waste the work already done.
+
+Rudder instead owns the provider connection and exposes a small local control
+socket, so a second command can steer the turn that is already in flight.
+
+- **Codex** — Rudder owns a `codex app-server` connection and calls `turn/steer`
+  on the running turn.
+- **Claude Code** — Rudder runs a small Bun adapter over the official Claude
+  Agent SDK. Its persistent streaming-input queue makes steering part of the
+  same live session, and structured SDK events expose summarized reasoning,
+  assistant updates, and tool lifecycle to the same TUI used for Codex.
+
+Both providers land in the same state directory, the same commands, and the
+same TUI.
 
 ```text
-task launcher ──stdio JSON-RPC──> codex app-server
+task launcher ──stdio JSON-RPC──> Codex app-server or Claude SDK adapter
       │
       ├── state.json / events.jsonl / trace.log / output.md
       │
       └── local Unix socket <── rudder steer "focus on the failing test first"
 ```
 
-The name is literal: Rudder does not replace the engine, model, auth provider,
-or app-server. It changes the heading of an in-flight turn.
+The name is literal: Rudder does not replace the engine, model, or auth
+provider. It changes the heading of an in-flight turn.
 
 ## Status
 
-Early working prototype. The Codex app-server protocol is still experimental,
-so Rudder should be verified against the installed Codex CLI after upgrades.
+Early working prototype. The Codex app-server protocol and Claude Agent SDK
+both evolve quickly, so Rudder should be reverified after provider upgrades.
+
+### Planned
+
+- **opencode support** — a provider adapter over its server/session API, so
+  opencode sessions steer through the same commands and TUI.
+- **Pi support** — a provider adapter for Pi, same control plane.
+
+Adding a provider means implementing one adapter behind the existing
+`--provider` flag. The state directory, control socket, steering commands, and
+TUI are provider-agnostic already.
 
 ## Build
 
 ```bash
+bun install
 go build -o rudder .
 ```
 
-Requires a Codex CLI with `codex app-server` and `turn/steer` support. The
-current command surface is verified against `codex-cli 0.145.0`.
+Requires Go 1.24 and Bun 1.4 or newer. Codex runs require a CLI with
+`codex app-server` and `turn/steer` support; that command surface is verified
+against `codex-cli 0.145.0`. Claude runs use the pinned official Claude Agent
+SDK and the caller's normal Claude Code authentication.
 
 ## Run a task
 
@@ -41,12 +81,39 @@ mkdir -p .scratch/rudder-demo
 $EDITOR .scratch/rudder-demo/prompt.md
 
 ./rudder run \
+  --provider codex \
   --cwd "$PWD" \
   --prompt-file .scratch/rudder-demo/prompt.md \
   --state-dir .scratch/rudder-demo/run \
   --model gpt-5.6-sol \
   --sandbox workspace-write
 ```
+
+`--provider` defaults to `codex`, so existing commands do not need to change.
+
+Run Claude Code through the same control plane:
+
+```bash
+./rudder run \
+  --provider claude \
+  --cwd "$PWD" \
+  --prompt-file .scratch/rudder-demo/prompt.md \
+  --state-dir .scratch/rudder-demo/claude.run \
+  --effort high \
+  --sandbox workspace-write
+```
+
+Omit `--model` to use Claude Code's configured default. Use
+`--claude-path /absolute/path/to/claude` when the executable is not normally
+discoverable, or set `RUDDER_CLAUDE_PATH` to make that choice persistent;
+`--claude-path` takes precedence. Point either at a wrapper script when your
+Claude authentication depends on shell or Keychain setup that a detached
+process does not inherit. `read-only`, `workspace-write`, and `danger-full-access` map to
+Claude's `plan`, `acceptEdits`, and `bypassPermissions` modes respectively.
+Rudder has no interactive approval dialog: approval-requiring operations that
+are not covered by the selected mode are denied instead of hanging. In
+practice this means `workspace-write` lets Claude read and write files but
+denies `Bash`; use `danger-full-access` when the task needs to run commands.
 
 Run it in the background from an agent harness so the harness can continue
 reading user messages and issue steering commands.
@@ -56,7 +123,7 @@ child process group. Set it to `0` only when an unbounded run is intentional.
 `SIGINT` and `SIGTERM` mark the run interrupted, terminate the app-server
 process group, and remove the control socket before Rudder exits.
 
-Resume an existing thread for another steerable turn:
+Resume an existing Codex thread or Claude session for another steerable turn:
 
 ```bash
 ./rudder run \
@@ -79,11 +146,11 @@ Fork first when the new work should preserve the source thread:
 
 Use `--fork-through-turn TURN_ID` instead to include the selected turn.
 
-## Discover and manage threads
+## Discover and manage Codex threads
 
-Thread commands print the app-server result as JSON so agent skills and shell
-scripts can consume pagination cursors and complete metadata without scraping
-human-formatted output:
+`rudder thread` is Codex-specific. It prints the app-server result as JSON so
+agent skills and shell scripts can consume pagination cursors and complete
+metadata without scraping human-formatted output:
 
 ```bash
 ./rudder thread list --limit 20 --cwd-filter "$PWD"
@@ -128,13 +195,67 @@ For exact multiline input:
 ./rudder interrupt --state-dir .scratch/rudder-demo/run
 ```
 
+For a live fullscreen view of several runs, install the CLI and its TUI assets
+once, then launch the dashboard from any directory:
+
+```bash
+./scripts/install-local.sh
+rudder tui
+```
+
+The dashboard shows live runs first, followed by the 20 most recent finished
+runs from Rudder's private global registry. It also discovers `state.json` files
+below `.scratch` in the directory where it was launched. New `rudder run`
+commands register themselves automatically. Use `--all` for the full history,
+or point it at extra locations with repeatable `--root DIR` and `--state-dir DIR`
+arguments:
+
+```bash
+./rudder tui --root /path/to/project/.scratch
+./rudder tui --state-dir /path/to/one/run --state-dir /path/to/another/run
+./rudder tui --all
+./rudder tui --theme tokyonight
+```
+
+Live and recent runs are visibly grouped; `/` filters them by project, thread,
+status, or model. Activity and Output are clickable tabs. Both panes support
+mouse-wheel scrolling, `/` search with `n`/`N` match navigation, and `c` to copy
+the selected row. In Activity, clicking selects a row and clicking a tool row
+expands it; use the Output tab for normal mouse text selection. Enter also
+expands Activity tool rows to show the full command, status, duration, working
+directory, and captured output. Scrolling up
+pauses follow mode; click the follow indicator or press End to return to live
+output. Press `i` for full session metadata.
+
+Press `t` to open the theme picker. Moving through the list previews each
+palette immediately; Enter saves the choice globally and Escape restores the
+previous palette. Rudder includes the 33 built-in OpenCode themes (using their
+dark variants) alongside its original theme. `--theme NAME` or
+`RUDDER_TUI_THEME=NAME` overrides the saved choice for one launch.
+
+For an active run, `s` steers and `x x` interrupts. For a finished run, `R`
+opens a prompt and continues the same provider thread/session in a fresh private
+run while preserving its working directory, model, effort, and sandbox. `r` refreshes,
+`o` switches Activity/Output, Tab changes panes, and `q` exits. State and
+artifacts otherwise refresh every 500ms; override that with a duration such as
+`--interval 2s`.
+
+`rudder tui` requires Bun 1.4 or newer and the optional `@opentui/core`
+dependency. The installer places the binary in `~/.local/bin` and the TUI in
+`~/.local/share/rudder` by default; both locations honor the standard
+`RUDDER_BIN_DIR` and `XDG_DATA_HOME` overrides. The launcher also finds a TUI
+beside the binary or in the current checkout. For custom development paths, set
+`RUDDER_TUI_ENTRY` and `RUDDER_CLAUDE_ADAPTER_ENTRY`. Legacy
+`CODEX_RUDDER_*` variables and installed assets remain readable.
+
 Run artifacts:
 
 - `state.json` — IDs, status, paths, and timestamps; no prompt or output text.
-- `events.jsonl` — raw app-server events.
+- `events.jsonl` — raw provider protocol events.
 - `trace.log` — compact human-readable progress.
 - `output.md` — all completed `agentMessage` items in order.
-- `app-server.stderr.log` — child diagnostics.
+- `provider.stderr.log` — child diagnostics (legacy runs retain their persisted
+  `app-server.stderr.log` path).
 
 The run directory and all files are owner-only (`0700` / `0600`). The control
 socket lives inside that directory when the Unix path limit permits; otherwise
@@ -142,6 +263,12 @@ Rudder creates a random owner-only temporary parent and records it in state.
 The raw events, trace, and output can contain prompt, command, and completion
 content. Persisted errors in `state.json` are generic; details remain in the
 private trace and stderr logs.
+
+The global run registry stores only private state-directory references under
+`~/.local/state/rudder/runs` (or `XDG_STATE_HOME`). It does not duplicate
+prompt, trace, output, or authentication content.
+The TUI also reads the legacy `codex-rudder/runs` registry so existing history
+does not disappear.
 
 If a process is killed without cleanup, `status` renders a non-terminal state
 as `stale`, while `wait`, `steer`, and `interrupt` fail promptly instead of
@@ -197,6 +324,12 @@ schema_dir=$(mktemp -d /tmp/codex-app-server-schema.XXXXXX)
 codex app-server generate-json-schema --experimental --out "$schema_dir"
 ```
 
+Treat those schemas as candidates, not a runtime capability guarantee. In
+`codex-cli 0.145.0`, for example, the experimental schema advertises
+`thread/items/list` while the initialized app-server returns JSON-RPC `-32601`
+for that method. Probe a method against the installed runtime before depending
+on it; Rudder intentionally does not expose `thread/items/list`.
+
 Rudder currently depends on:
 
 - `initialize` then `initialized`
@@ -210,10 +343,67 @@ Rudder currently depends on:
 - `turn/interrupt`
 - `turn/started`, `item/*`, and `turn/completed` notifications
 
+The Claude adapter implements only the corresponding lifecycle subset needed by
+`rudder run`, `steer`, and `interrupt`; it is not a general Codex app-server.
+Only Claude sessions launched by Rudder are live-observable and steerable.
+Claude reasoning in the TUI is the provider's summarized thinking stream, not
+hidden raw chain of thought.
+
+## Install with a coding agent
+
+Hand this to Claude Code, Codex, Cursor, or any agent with shell access. It is
+written to be pasted verbatim.
+
+````text
+Install Rudder (https://github.com/safzanpirani/rudder) on this machine and
+verify it works. Follow these steps in order and stop at the first failure.
+
+1. Check prerequisites. Report the version of each and stop if any is missing:
+   - Go 1.24 or newer  (`go version`)
+   - Bun 1.4 or newer  (`bun --version`)
+   - At least one provider: `codex --version`, or `claude --version`.
+
+2. Clone the repo somewhere sensible and build it:
+   git clone https://github.com/safzanpirani/rudder
+   cd rudder
+   bun install
+   go build -o rudder .
+
+3. Run the test suite and stop if anything fails:
+   go test ./...
+   go vet ./...
+   bun test
+   bunx tsc -p tsconfig.json --noEmit
+
+4. Install it onto PATH:
+   ./scripts/install-local.sh
+   Then confirm `rudder --help` runs from a directory other than the repo.
+
+5. Smoke-test a real turn. Create a scratch prompt that asks the provider to
+   reply with exactly SMOKE_OK, then:
+   rudder run --provider codex --cwd /tmp/rudder-smoke/ws \
+     --prompt-file /tmp/rudder-smoke/prompt.md \
+     --state-dir /tmp/rudder-smoke/run --sandbox read-only
+   rudder peek --state-dir /tmp/rudder-smoke/run
+
+6. If you are setting up the Claude provider and it reports an authentication
+   failure, the cause is almost always that the resolved `claude` executable
+   cannot reach its credentials from a detached process. Do not put any token
+   into Rudder. Instead point Rudder at the wrapper or launcher that does work
+   interactively, using `--claude-path` or `RUDDER_CLAUDE_PATH`.
+
+7. Report what you installed, where the binary landed, which providers
+   authenticated, and the exact output of any step that failed. Do not modify
+   my shell configuration without telling me what you changed.
+````
+
 ## Development
 
 ```bash
 gofmt -w *.go
 go test ./...
+go vet ./...
 go build -o rudder .
+bun test
+bunx tsc -p tsconfig.json --noEmit
 ```

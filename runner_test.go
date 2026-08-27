@@ -139,6 +139,10 @@ func TestOneLineAndFlattenStrings(t *testing.T) {
 	if got != "hello world" {
 		t.Fatalf("oneLine = %q", got)
 	}
+	longMessage := strings.Repeat("complete message ", 40)
+	if got := singleLine(longMessage); got != strings.TrimSpace(longMessage) {
+		t.Fatalf("singleLine truncated agent output: %q", got)
+	}
 	got = flattenStrings([]any{map[string]any{"text": "first"}, "second"})
 	if got != "first second" {
 		t.Fatalf("flattenStrings = %q", got)

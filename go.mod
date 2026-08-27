@@ -1,3 +1,3 @@
-module codex-rudder
+module rudder
 
 go 1.24

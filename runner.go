@@ -25,6 +25,7 @@ const (
 )
 
 type runConfig struct {
+	Provider          string
 	CWD               string
 	PromptFile        string
 	StateDir          string
@@ -32,6 +33,7 @@ type runConfig struct {
 	Effort            string
 	Sandbox           string
 	ApprovalPolicy    string
+	ClaudePath        string
 	Ephemeral         bool
 	ResumeThreadID    string
 	ForkThreadID      string
@@ -39,6 +41,7 @@ type runConfig struct {
 	ForkThroughTurnID string
 	TurnTimeout       time.Duration
 	ChildCommand      []string
+	RegisterRun       bool
 }
 
 type rpcError struct {
@@ -171,16 +174,29 @@ func runControllerContext(ctx context.Context, cfg runConfig) error {
 }
 
 func validateRunConfig(cfg *runConfig) error {
+	provider, err := normalizeProvider(cfg.Provider)
+	if err != nil {
+		return err
+	}
+	cfg.Provider = provider
 	if len(cfg.ChildCommand) == 0 {
-		return errors.New("app-server command is empty")
+		return errors.New("provider command is empty")
 	}
 	cwd, err := filepath.Abs(cfg.CWD)
 	if err != nil {
 		return err
 	}
 	cfg.CWD = cwd
-	if cfg.Model == "" {
+	if cfg.Provider == providerCodex && cfg.Model == "" {
 		return errors.New("model is required")
+	}
+	if cfg.Provider == providerClaude {
+		if cfg.ApprovalPolicy != "never" {
+			return errors.New("Claude runs require --approval-policy never because Rudder has no interactive approval surface")
+		}
+		if cfg.ForkThreadID != "" || cfg.ForkBeforeTurnID != "" || cfg.ForkThroughTurnID != "" {
+			return errors.New("Claude runs do not yet support --fork-thread or fork turn selectors; use --resume-thread")
+		}
 	}
 	if cfg.ResumeThreadID != "" && cfg.ForkThreadID != "" {
 		return errors.New("--resume-thread and --fork-thread are mutually exclusive")
@@ -328,15 +344,15 @@ func (r *controller) initializeSession() error {
 	var initialized map[string]any
 	if err := r.call("initialize", map[string]any{
 		"clientInfo": map[string]any{
-			"name":    "codex-rudder",
-			"title":   "Codex Rudder",
+			"name":    "rudder",
+			"title":   "Rudder",
 			"version": version,
 		},
 		"capabilities": map[string]any{
 			"experimentalApi": true,
 		},
 	}, &initialized, 30*time.Second); err != nil {
-		return fmt.Errorf("initialize app-server: %w", err)
+		return fmt.Errorf("initialize provider: %w", err)
 	}
 	if err := r.notify("initialized", map[string]any{}); err != nil {
 		return err
@@ -351,15 +367,24 @@ func (r *controller) acquireThread() (string, string, error) {
 		} `json:"thread"`
 	}
 	baseParams := map[string]any{
-		"model":          r.cfg.Model,
 		"cwd":            r.cfg.CWD,
 		"approvalPolicy": r.cfg.ApprovalPolicy,
 		"sandbox":        r.cfg.Sandbox,
+		"provider":       r.cfg.Provider,
+	}
+	if r.cfg.Model != "" {
+		baseParams["model"] = r.cfg.Model
+	}
+	if r.cfg.Provider == providerClaude {
+		baseParams["persistSession"] = !r.cfg.Ephemeral
+		if r.cfg.ClaudePath != "" {
+			baseParams["claudePath"] = r.cfg.ClaudePath
+		}
 	}
 	method := "thread/start"
 	mode := "started"
 	baseParams["ephemeral"] = r.cfg.Ephemeral
-	baseParams["serviceName"] = "codex-rudder"
+	baseParams["serviceName"] = "rudder"
 	if r.cfg.ResumeThreadID != "" {
 		method = "thread/resume"
 		mode = "resumed"
@@ -500,7 +525,7 @@ func (r *controller) readChild(reader io.Reader) {
 		_, _ = r.events.Write(append(raw, '\n'))
 		var message rpcEnvelope
 		if err := json.Unmarshal(raw, &message); err != nil {
-			r.tracef("[warn] invalid app-server JSON: %v", err)
+			r.tracef("[warn] invalid provider JSON: %v", err)
 			continue
 		}
 		if message.Method != "" {
@@ -517,11 +542,11 @@ func (r *controller) readChild(reader io.Reader) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		r.fail(fmt.Errorf("read app-server output: %w", err))
+		r.fail(fmt.Errorf("read provider output: %w", err))
 		return
 	}
 	if !terminalStatus(r.store.snapshot().Status) {
-		r.fail(errors.New("app-server output closed before turn completed"))
+		r.fail(errors.New("provider output closed before turn completed"))
 	}
 }
 
@@ -575,7 +600,7 @@ func (r *controller) handleServerMessage(message rpcEnvelope) {
 		r.tracef("[turn] started %s", params.Turn.ID)
 	case "turn/completed":
 		r.handleTurnCompleted(message.Params)
-	case "item/started", "item/completed":
+	case "item/started", "item/updated", "item/completed":
 		r.handleItem(message.Method, message.Params)
 	case "error":
 		var params struct {
@@ -600,7 +625,7 @@ func (r *controller) rejectServerRequest(message rpcEnvelope) {
 		"id": id,
 		"error": map[string]any{
 			"code":    -32601,
-			"message": "Codex Rudder cannot answer this interactive request; run with approvalPolicy=never",
+			"message": "Rudder cannot answer this interactive request; run with approvalPolicy=never",
 		},
 	})
 }
@@ -634,6 +659,9 @@ func (r *controller) handleItem(method string, raw json.RawMessage) {
 	}
 	itemType, _ := params.Item["type"].(string)
 	status, _ := params.Item["status"].(string)
+	if method == "item/updated" {
+		return
+	}
 	prefix := "[item]"
 	if method == "item/started" {
 		prefix = "[in_progress]"
@@ -647,7 +675,17 @@ func (r *controller) handleItem(method string, raw json.RawMessage) {
 		command, _ := params.Item["command"].(string)
 		r.tracef("%s $ %s", prefix, oneLine(command, 240))
 	case "fileChange":
-		r.tracef("%s file changes", prefix)
+		command, _ := params.Item["command"].(string)
+		if command == "" {
+			command = "file changes"
+		}
+		r.tracef("%s %s", prefix, oneLine(command, 240))
+	case "webSearch", "toolCall":
+		command, _ := params.Item["command"].(string)
+		if command == "" {
+			command, _ = params.Item["toolName"].(string)
+		}
+		r.tracef("%s %s", prefix, oneLine(command, 240))
 	case "reasoning":
 		if method == "item/completed" {
 			r.tracef("[think] %s", oneLine(flattenStrings(params.Item["summary"]), 240))
@@ -662,7 +700,7 @@ func (r *controller) handleItem(method string, raw json.RawMessage) {
 					terminateProcessTree(r.child, false)
 					return
 				}
-				r.tracef("[say] %s", oneLine(text, 240))
+				r.tracef("[say] %s", singleLine(text))
 			}
 		}
 	default:
@@ -722,9 +760,9 @@ func redactedStateError(status, errText string) string {
 	}
 	switch status {
 	case "interrupted":
-		return "turn interrupted; see trace.log and app-server.stderr.log"
+		return "turn interrupted; see trace.log and provider.stderr.log"
 	default:
-		return "turn failed; see trace.log and app-server.stderr.log"
+		return "turn failed; see trace.log and provider.stderr.log"
 	}
 }
 
@@ -780,11 +818,15 @@ func (r *controller) tracef(format string, args ...any) {
 }
 
 func oneLine(value string, limit int) string {
-	value = strings.Join(strings.Fields(value), " ")
+	value = singleLine(value)
 	if len(value) <= limit {
 		return value
 	}
 	return value[:limit] + "…"
+}
+
+func singleLine(value string) string {
+	return strings.Join(strings.Fields(value), " ")
 }
 
 func flattenStrings(value any) string {

@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	ctx := context.Background()
@@ -42,6 +42,8 @@ func runCLIContext(ctx context.Context, args []string) error {
 		return runCommandContext(ctx, args[1:])
 	case "thread":
 		return threadCommand(args[1:])
+	case "tui":
+		return tuiCommand(args[1:])
 	case "steer":
 		return steerCommand(args[1:])
 	case "status":
@@ -53,7 +55,7 @@ func runCLIContext(ctx context.Context, args []string) error {
 	case "wait":
 		return waitCommand(args[1:])
 	case "version", "--version", "-version":
-		fmt.Println("codex-rudder", version)
+		fmt.Println("rudder", version)
 		return nil
 	case "help", "--help", "-h":
 		printUsage()
@@ -72,19 +74,22 @@ func runCommandContext(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	cwd, _ := os.Getwd()
 	var cfg runConfig
-	fs.StringVar(&cfg.CWD, "cwd", cwd, "working directory for the Codex thread")
+	fs.StringVar(&cfg.Provider, "provider", providerCodex, "provider: codex or claude")
+	fs.StringVar(&cfg.CWD, "cwd", cwd, "working directory for the provider session")
 	fs.StringVar(&cfg.PromptFile, "prompt-file", "", "file containing the initial task")
 	fs.StringVar(&cfg.StateDir, "state-dir", "", "directory for state, trace, and output")
-	fs.StringVar(&cfg.Model, "model", "gpt-5.6-sol", "Codex model")
+	fs.StringVar(&cfg.Model, "model", "", "provider model; Codex defaults to gpt-5.6-sol")
 	fs.StringVar(&cfg.Effort, "effort", "", "reasoning effort override")
 	fs.StringVar(&cfg.Sandbox, "sandbox", "workspace-write", "read-only, workspace-write, or danger-full-access")
-	fs.StringVar(&cfg.ApprovalPolicy, "approval-policy", "never", "Codex approval policy")
-	fs.BoolVar(&cfg.Ephemeral, "ephemeral", false, "do not persist the Codex thread")
-	fs.StringVar(&cfg.ResumeThreadID, "resume-thread", "", "resume this thread before starting the turn")
+	fs.StringVar(&cfg.ApprovalPolicy, "approval-policy", "never", "Codex approval policy; Claude requires never")
+	fs.StringVar(&cfg.ClaudePath, "claude-path", "", "Claude Code executable for --provider claude")
+	fs.BoolVar(&cfg.Ephemeral, "ephemeral", false, "do not persist the provider session")
+	fs.StringVar(&cfg.ResumeThreadID, "resume-thread", "", "resume this provider thread/session before starting the turn")
 	fs.StringVar(&cfg.ForkThreadID, "fork-thread", "", "fork this thread before starting the turn")
 	fs.StringVar(&cfg.ForkBeforeTurnID, "fork-before-turn", "", "when forking, exclude this turn and everything after it")
 	fs.StringVar(&cfg.ForkThroughTurnID, "fork-through-turn", "", "when forking, include history through this turn")
 	fs.DurationVar(&cfg.TurnTimeout, "turn-timeout", time.Hour, "maximum active turn duration; zero disables the watchdog")
+	cfg.RegisterRun = true
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -94,10 +99,8 @@ func runCommandContext(ctx context.Context, args []string) error {
 	if cfg.StateDir == "" {
 		return errors.New("--state-dir is required")
 	}
-	if fs.NArg() > 0 {
-		cfg.ChildCommand = fs.Args()
-	} else {
-		cfg.ChildCommand = []string{"codex", "app-server", "--listen", "stdio://"}
+	if err := configureProviderDefaults(&cfg, fs.Args()); err != nil {
+		return err
 	}
 	return runControllerContext(ctx, cfg)
 }
@@ -164,7 +167,7 @@ func statusCommand(args []string) error {
 	if asJSON {
 		return printJSON(state)
 	}
-	fmt.Printf("%s thread=%s turn=%s pid=%d steers=%d\n", state.Status, state.ThreadID, state.TurnID, state.PID, state.Steers)
+	fmt.Printf("%s provider=%s thread=%s turn=%s pid=%d steers=%d\n", state.Status, state.Provider, state.ThreadID, state.TurnID, state.PID, state.Steers)
 	if state.Error != "" {
 		fmt.Println("error:", state.Error)
 	}
@@ -264,15 +267,17 @@ func waitCommand(args []string) error {
 
 func printUsage() {
 	name := filepath.Base(os.Args[0])
-	fmt.Fprintf(os.Stderr, `Codex Rudder - live steering for codex app-server
+	fmt.Fprintf(os.Stderr, `Rudder - live steering for Codex and Claude Code
 
 Usage:
-  %s run --prompt-file FILE --state-dir DIR [options] [-- APP_SERVER_COMMAND...]
+  %s run [--provider codex|claude] --prompt-file FILE --state-dir DIR [options]
+         [-- APP_SERVER_COMMAND...]
   %s thread list|search|read|turns|fork|name|archive|unarchive [options]
+  %s tui [--root DIR] [--state-dir DIR] [--all] [--theme NAME]
   %s steer --state-dir DIR "new direction"
   %s status --state-dir DIR [--json]
   %s peek --state-dir DIR [-n 25]
   %s interrupt --state-dir DIR
   %s wait --state-dir DIR [--timeout 10m]
-`, name, name, name, name, name, name, name)
+`, name, name, name, name, name, name, name, name)
 }

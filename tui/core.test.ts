@@ -1,0 +1,453 @@
+import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  artifactAllowsTextSelection,
+  discoverSessions,
+  compactSessionDetails,
+  continuationRunArguments,
+  filterSessions,
+  initialViewState,
+  latestAgentUpdate,
+  parseTraceActivities,
+  parseToolEventDetails,
+  readTail,
+  reduceView,
+  sessionDescription,
+  sessionDetails,
+  statusGlyph,
+  visibleArtifactTail,
+  visibleSessions,
+  type Session,
+} from "./core";
+
+function session(overrides: Partial<Session> = {}): Session {
+  return {
+    version: 1,
+    pid: 123,
+    status: "active",
+    stateDir: "/tmp/run-a",
+    stateFile: "/tmp/run-a/state.json",
+    threadId: "thread-1234567890",
+    turnId: "turn-1234567890",
+    model: "gpt-test",
+    startedAt: "2026-08-25T00:00:00Z",
+    updatedAt: "2026-08-25T00:01:00Z",
+    ...overrides,
+  };
+}
+
+describe("view reducer", () => {
+  test("preserves a selected session across refreshes", () => {
+    const selected = { ...initialViewState, selectedStateDir: "/tmp/run-b" };
+    const next = reduceView(selected, {
+      type: "sessions",
+      sessions: [session(), session({ stateDir: "/tmp/run-b" })],
+    });
+    expect(next.selectedStateDir).toBe("/tmp/run-b");
+  });
+
+  test("falls back to the first session when selection disappears", () => {
+    const selected = { ...initialViewState, selectedStateDir: "/tmp/missing" };
+    const next = reduceView(selected, {
+      type: "sessions",
+      sessions: [session()],
+    });
+    expect(next.selectedStateDir).toBe("/tmp/run-a");
+  });
+
+  test("tracks artifact, focus, steering, and guarded interrupt state", () => {
+    let state = reduceView(initialViewState, { type: "toggle-artifact" });
+    state = reduceView(state, { type: "toggle-focus" });
+    state = reduceView(state, { type: "open-steer" });
+    state = reduceView(state, { type: "arm-interrupt", now: 100 });
+    expect(state).toMatchObject({
+      artifact: "output",
+      focus: "steer",
+      interruptArmedUntil: 2100,
+    });
+  });
+});
+
+describe("session discovery", () => {
+  test("recurses, skips invalid state, marks dead runs stale, and sorts active first", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rudder-tui-discovery-"));
+    const activeDir = join(root, "nested", "active");
+    const staleDir = join(root, "stale");
+    await mkdir(activeDir, { recursive: true });
+    await mkdir(staleDir, { recursive: true });
+    await writeFile(
+      join(activeDir, "state.json"),
+      JSON.stringify(session({ stateDir: activeDir, pid: 1 })),
+    );
+    await writeFile(
+      join(staleDir, "state.json"),
+      JSON.stringify(
+        session({ stateDir: staleDir, pid: 2, status: "starting" }),
+      ),
+    );
+    await writeFile(join(root, "state.json"), "not json");
+
+    const sessions = await discoverSessions({
+      roots: [root],
+      stateDirs: [],
+      registryDirs: [],
+      processAlive: (pid) => pid === 1,
+    });
+    expect(sessions.map(({ status }) => status)).toEqual(["active", "stale"]);
+    expect(sessions.every(({ provider }) => provider === "codex")).toBe(true);
+    expect(sessions[1]?.error).toContain("not running");
+  });
+
+  test("discovers runs referenced by the global registry", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rudder-tui-registry-"));
+    const registryDir = join(root, "registry");
+    const stateDir = join(root, "outside-project", "run");
+    await mkdir(registryDir, { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(
+      join(stateDir, "state.json"),
+      JSON.stringify(session({ stateDir, pid: 1 })),
+    );
+    await writeFile(join(registryDir, "active.run"), `${stateDir}\n`);
+
+    const sessions = await discoverSessions({
+      roots: [],
+      stateDirs: [],
+      registryDirs: [registryDir],
+      processAlive: () => true,
+    });
+    expect(sessions.map(({ stateDir: discovered }) => discovered)).toEqual([
+      stateDir,
+    ]);
+  });
+});
+
+describe("artifact and display helpers", () => {
+  test("reserves native mouse text selection for the output pane", () => {
+    expect(artifactAllowsTextSelection("trace")).toBe(false);
+    expect(artifactAllowsTextSelection("output")).toBe(true);
+  });
+
+  test("reads only complete lines from a bounded tail", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rudder-tui-tail-"));
+    const artifact = join(root, "trace.log");
+    await writeFile(artifact, "first\nsecond\nthird\n");
+    expect(await readTail(artifact, 13)).toBe("second\nthird");
+  });
+
+  test("keeps the newest artifact lines visible", () => {
+    expect(visibleArtifactTail("one\ntwo\nthree\nfour", 2)).toBe("three\nfour");
+  });
+
+  test("turns raw trace lines into a compact semantic activity feed", () => {
+    const activities = parseTraceActivities(
+      [
+        "2026-08-25T18:00:00Z [think] **Inspecting tests** **Planning fix**",
+        `2026-08-25T18:00:01Z [in_progress] $ /bin/zsh -lc 'go test ./...'`,
+        `2026-08-25T18:00:03Z [completed] $ /bin/zsh -lc 'go test ./...'`,
+        "2026-08-25T18:00:03Z [usage] updated",
+        "2026-08-25T18:00:03Z [say] Still working.",
+        "2026-08-25T18:00:04Z [in_progress] file changes",
+        "2026-08-25T18:00:05Z [say] Tests are green.",
+        `2026-08-25T18:00:06Z [in_progress] $ /bin/zsh -lc 'rg -n "needle" very-long-path…`,
+      ].join("\n"),
+    );
+    expect(activities).toEqual([
+      {
+        timestamp: "2026-08-25T18:00:00Z",
+        kind: "thought",
+        text: "Inspecting tests · Planning fix",
+      },
+      {
+        timestamp: "2026-08-25T18:00:03Z",
+        kind: "tool",
+        label: "shell",
+        text: "go test ./...",
+        toolStatus: "completed",
+        durationMs: 2000,
+      },
+      {
+        timestamp: "2026-08-25T18:00:04Z",
+        kind: "tool",
+        label: "files",
+        text: "changed",
+        toolStatus: "running",
+      },
+      {
+        timestamp: "2026-08-25T18:00:05Z",
+        kind: "message",
+        text: "Tests are green.",
+      },
+      {
+        timestamp: "2026-08-25T18:00:06Z",
+        kind: "tool",
+        label: "shell",
+        text: 'rg -n "needle" very-long-path…',
+        toolStatus: "running",
+      },
+    ]);
+  });
+
+  test("keeps live sessions plus recent history by default", () => {
+    const runs = [
+      session({ stateDir: "/active", status: "active" }),
+      ...Array.from({ length: 24 }, (_, index) =>
+        session({ stateDir: `/history-${index}`, status: "completed" }),
+      ),
+    ];
+    expect(visibleSessions(runs, false, [])).toHaveLength(21);
+    expect(visibleSessions(runs, false, ["/history-23"])).toHaveLength(22);
+    expect(visibleSessions(runs, true, [])).toHaveLength(25);
+  });
+
+  test("selects the latest full commentary update instead of the final answer", () => {
+    const events = [
+      "partial tail record",
+      JSON.stringify({
+        method: "item/completed",
+        params: {
+          item: {
+            type: "agentMessage",
+            phase: "commentary",
+            text: "First update",
+          },
+        },
+      }),
+      JSON.stringify({
+        method: "item/completed",
+        params: {
+          item: {
+            type: "agentMessage",
+            phase: "commentary",
+            text: "Full latest update",
+          },
+        },
+      }),
+      JSON.stringify({
+        method: "item/completed",
+        params: {
+          item: {
+            type: "agentMessage",
+            phase: "final",
+            text: "Long final handoff",
+          },
+        },
+      }),
+    ].join("\n");
+    expect(latestAgentUpdate(events)).toBe("Full latest update");
+  });
+
+  test("joins tool lifecycle events into expandable details", () => {
+    const events = [
+      JSON.stringify({
+        method: "item/started",
+        params: {
+          item: {
+            id: "tool-1",
+            type: "commandExecution",
+            command: "go test ./...",
+            cwd: "/work/parser",
+            status: "inProgress",
+          },
+        },
+      }),
+      JSON.stringify({
+        method: "item/completed",
+        params: {
+          item: {
+            id: "tool-1",
+            type: "commandExecution",
+            command: "go test ./...",
+            cwd: "/work/parser",
+            status: "completed",
+            aggregatedOutput: "ok parser",
+            exitCode: 0,
+            durationMs: 1250,
+          },
+        },
+      }),
+    ].join("\n");
+    expect(parseToolEventDetails(events)).toEqual([
+      {
+        id: "tool-1",
+        type: "commandExecution",
+        command: "go test ./...",
+        cwd: "/work/parser",
+        status: "completed",
+        output: "ok parser",
+        exitCode: 0,
+        durationMs: 1250,
+        query: undefined,
+      },
+    ]);
+  });
+
+  test("joins Claude generic tool updates by stable item id", () => {
+    const events = [
+      JSON.stringify({
+        method: "item/started",
+        params: {
+          item: {
+            id: "tool-claude",
+            type: "toolCall",
+            toolName: "Grep",
+            input: {},
+            command: "Grep",
+            status: "inProgress",
+          },
+        },
+      }),
+      JSON.stringify({
+        method: "item/updated",
+        params: {
+          item: {
+            id: "tool-claude",
+            type: "toolCall",
+            toolName: "Grep",
+            input: { pattern: "provider", path: "tui" },
+            command: "Grep provider",
+            status: "inProgress",
+          },
+        },
+      }),
+      JSON.stringify({
+        method: "item/completed",
+        params: {
+          item: {
+            id: "tool-claude",
+            type: "toolCall",
+            toolName: "Grep",
+            input: { pattern: "provider", path: "tui" },
+            command: "Grep provider",
+            aggregatedOutput: "tui/core.ts: provider",
+            status: "completed",
+          },
+        },
+      }),
+    ].join("\n");
+    expect(parseToolEventDetails(events)).toEqual([
+      expect.objectContaining({
+        id: "tool-claude",
+        type: "toolCall",
+        toolName: "Grep",
+        input: { pattern: "provider", path: "tui" },
+        status: "completed",
+        output: "tui/core.ts: provider",
+      }),
+    ]);
+  });
+
+  test("filters sessions across project, ids, status, and model", () => {
+    const runs = [
+      session({
+        cwd: "/work/parser",
+        status: "completed",
+        model: "gpt-parser",
+      }),
+      session({
+        stateDir: "/active",
+        cwd: "/work/payments",
+        threadId: "thread-pay",
+      }),
+    ];
+    expect(filterSessions(runs, "payments")).toHaveLength(1);
+    expect(filterSessions(runs, "completed")).toHaveLength(1);
+    expect(filterSessions(runs, "PARSER")).toHaveLength(1);
+    expect(filterSessions(runs, "thread-pay")).toHaveLength(1);
+  });
+
+  test("continues a thread with its working directory and model settings", () => {
+    const args = continuationRunArguments(
+      session({
+        cwd: "/work/parser",
+        threadId: "thread-parser",
+        model: "gpt-parser",
+        effort: "high",
+        sandbox: "danger-full-access",
+      }),
+      "/private/prompt.md",
+      "/private/new.run",
+    );
+    expect(args).toEqual([
+      "run",
+      "--provider",
+      "codex",
+      "--cwd",
+      "/work/parser",
+      "--resume-thread",
+      "thread-parser",
+      "--prompt-file",
+      "/private/prompt.md",
+      "--state-dir",
+      "/private/new.run",
+      "--sandbox",
+      "danger-full-access",
+      "--approval-policy",
+      "never",
+      "--model",
+      "gpt-parser",
+      "--effort",
+      "high",
+    ]);
+  });
+
+  test("continues Claude with its provider session and no invented model", () => {
+    const args = continuationRunArguments(
+      session({
+        provider: "claude",
+        cwd: "/work/claude",
+        threadId: "claude-session",
+        model: undefined,
+      }),
+      "/private/prompt.md",
+      "/private/claude.run",
+    );
+    expect(args.slice(0, 8)).toEqual([
+      "run",
+      "--provider",
+      "claude",
+      "--cwd",
+      "/work/claude",
+      "--resume-thread",
+      "claude-session",
+      "--prompt-file",
+    ]);
+    expect(args).not.toContain("--model");
+  });
+
+  test("keeps statuses distinguishable without color", () => {
+    expect(
+      new Set(
+        [
+          "active",
+          "starting",
+          "completed",
+          "failed",
+          "interrupted",
+          "stale",
+        ].map(statusGlyph),
+      ).size,
+    ).toBe(6);
+  });
+
+  test("renders concise list and detail text", () => {
+    const value = session({ cwd: "/work/parser", steers: 2 });
+    expect(sessionDescription(value)).toContain(
+      "active · turn-1234567… · gpt-test",
+    );
+    expect(sessionDetails(value)).toContain("cwd      /work/parser");
+    expect(sessionDetails(value)).toContain("steers 2");
+    expect(compactSessionDetails(value).split("\n")).toHaveLength(4);
+    expect(compactSessionDetails(value)).not.toContain("thread");
+  });
+
+  test("treats Go's zero completion time as an unfinished run", () => {
+    const value = session({
+      startedAt: "2020-01-01T00:00:00Z",
+      completedAt: "0001-01-01T00:00:00Z",
+    });
+    expect(sessionDetails(value)).not.toContain("runtime  0s");
+  });
+});

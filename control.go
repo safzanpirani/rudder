@@ -140,7 +140,7 @@ func (r *controller) steer(text string) error {
 		return err
 	}
 	if result.TurnID != state.TurnID {
-		return fmt.Errorf("app-server acknowledged unexpected turn %s", result.TurnID)
+		return fmt.Errorf("provider acknowledged unexpected turn %s", result.TurnID)
 	}
 	if err := r.store.update(func(current *runState) { current.Steers++ }); err != nil {
 		persistErr := fmt.Errorf("persist steer count: %w", err)

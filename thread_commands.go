@@ -200,7 +200,7 @@ func startAppServerSession(ctx context.Context, cwd string, childCommand []strin
 func (s *appServerSession) initialize() error {
 	var result map[string]any
 	if err := s.call("initialize", map[string]any{
-		"clientInfo":   map[string]any{"name": "codex-rudder", "title": "Codex Rudder", "version": version},
+		"clientInfo":   map[string]any{"name": "rudder", "title": "Rudder", "version": version},
 		"capabilities": map[string]any{"experimentalApi": true},
 	}, &result); err != nil {
 		return fmt.Errorf("initialize app-server: %w", err)
@@ -223,7 +223,7 @@ func (s *appServerSession) call(method string, params any, target any) error {
 			if len(message.ID) > 0 {
 				var requestID any
 				if json.Unmarshal(message.ID, &requestID) == nil {
-					_ = s.write(map[string]any{"id": requestID, "error": map[string]any{"code": -32601, "message": "Codex Rudder thread command cannot answer interactive requests"}})
+					_ = s.write(map[string]any{"id": requestID, "error": map[string]any{"code": -32601, "message": "Rudder thread command cannot answer interactive requests"}})
 				}
 			}
 			continue

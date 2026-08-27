@@ -6,6 +6,7 @@ Small, non-blocking frictions encountered by agents while working. Review this f
 
 - **Directory:** `/Users/safzan/Development/projects/codex-rudder`
 - **Tags:** `misleading-error`
+- **Resolved:** 2026-08-23T16:02:27.527Z — Global AGENTS.md now reserves zsh path and requires task-specific variable names.
 
 While extracting Codex app-server schema fields in zsh, assigning a loop variable named path silently overwrote zsh's special PATH array and made jq appear missing. Avoid lowercase path as a zsh variable or run the loop under sh/bash.
 
@@ -20,6 +21,7 @@ Codex CLI 0.145.0 generate-json-schema --experimental advertises thread/items/li
 
 - **Directory:** `/Users/safzan/Development/projects/codex-rudder`
 - **Tags:** `misleading-error`
+- **Resolved:** 2026-08-23T16:02:27.672Z — Global AGENTS.md now reserves zsh status and path and provides safe replacements.
 
 While reporting a Codex Rudder SIGTERM smoke in zsh, assigning to the ordinary-looking variable name status failed because zsh reserves it as read-only. Avoid status and path as zsh script variables; use task-specific names such as run_status and schema_file.
 
@@ -27,6 +29,7 @@ While reporting a Codex Rudder SIGTERM smoke in zsh, assigning to the ordinary-l
 
 - **Directory:** `/Users/safzan/Development/projects/codex-rudder`
 - **Tags:** `stale-cache`
+- **Resolved:** 2026-08-23T16:02:27.778Z — Global AGENTS.md now requires re-deriving and validating temporary paths between sessions.
 
 A later Codex Rudder live smoke reused a /tmp prompt path from an earlier session, but the temporary file had already been cleaned, causing the run to fail before state creation. Recreate or validate temp artifacts immediately before each smoke instead of treating /tmp paths as durable.
 
@@ -36,4 +39,28 @@ A later Codex Rudder live smoke reused a /tmp prompt path from an earlier sessio
 - **Tags:** `tooling`, `github-connector`
 
 While opening a draft PR for the private codex-rudder repository, the GitHub connector returned a 404 after an authenticated git push succeeded. The connector likely lacks access to this private repo; falling back to the authenticated gh CLI worked around it.
+
+## 2026-07-26T08:23:10.581Z — codex — gpt-5.6-sol
+
+- **Directory:** `/Users/safzan/Development/projects/codex-rudder`
+- **Tags:** `tooling`, `workflow`
+- **Resolved:** 2026-08-23T16:21:33.745Z — Global operational runbook now requires creating workdirs before launch and separates temporary worktree create/use/remove calls.
+
+While rebuilding Rudder from a clean temporary worktree, the unified shell rejected a narrowly scoped cleanup trap because it contained rm -f, and a follow-up command failed because its workdir was created inside the command rather than before process startup. Create the worktree in one call, build from it in a second call, and remove it with git worktree remove.
+
+## 125087 · 2026-08-25T18:13:03.034Z — codex — gpt-5.6-sol
+
+- **Directory:** `/Users/safzan/Development/projects/codex-rudder`
+- **Tags:** `flaky-command`
+- **Resolved:** 2026-08-25T18:15:38.052Z — Installer now copies to a fresh temp inode, chmods it, atomically renames it over the executable, and verifies SHA-256. This avoids in-place overwrite of binaries backing live Rudder processes.
+
+While installing the global Rudder binary, macOS killed a final cmp -s verification with signal 9 after the copy and dependency install completed. Replace the verification with explicit SHA-256 output comparison so failures remain diagnosable.
+
+## aafd02 · 2026-08-25T20:39:11.122Z — codex — gpt-5.6-sol
+
+- **Directory:** `/Users/safzan/Development/projects/codex-rudder`
+- **About:** `tmux-skill`
+- **Tags:** `docs`
+
+The tmux SKILL.md helper example uses positional arguments for wait-for-text.sh, but the installed script requires -t and -p named flags. Update the example to match the helper's current CLI.
 
