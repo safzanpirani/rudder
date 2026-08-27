@@ -479,6 +479,16 @@ export function buildQueryOptions(thread: ThreadConfig): Options {
       : thread.sandbox === "danger-full-access"
         ? "bypassPermissions"
         : "acceptEdits";
+  const sandbox =
+    thread.sandbox === "workspace-write"
+      ? {
+          enabled: true,
+          failIfUnavailable: true,
+          autoAllowBashIfSandboxed: true,
+          allowUnsandboxedCommands: false,
+          filesystem: { allowWrite: [thread.cwd] },
+        }
+      : undefined;
   return {
     cwd: thread.cwd,
     systemPrompt: { type: "preset", preset: "claude_code" },
@@ -487,6 +497,7 @@ export function buildQueryOptions(thread: ThreadConfig): Options {
     forwardSubagentText: false,
     thinking: { type: "adaptive" },
     permissionMode,
+    ...(sandbox ? { sandbox } : {}),
     persistSession: thread.persistSession,
     ...(thread.resumed ? { resume: thread.id } : { sessionId: thread.id }),
     ...(thread.model ? { model: thread.model } : {}),
@@ -495,13 +506,31 @@ export function buildQueryOptions(thread: ThreadConfig): Options {
     ...(permissionMode === "bypassPermissions"
       ? { allowDangerouslySkipPermissions: true }
       : {
-          canUseTool: async (toolName) => ({
-            behavior: "deny" as const,
-            message:
-              toolName === "AskUserQuestion"
-                ? "Rudder cannot answer interactive questions; proceed with best judgment."
-                : "Rudder has no interactive approval surface for this operation.",
-          }),
+          // Sandboxed Bash commands bypass this callback. Any request that
+          // reaches it requires an interactive approval or sandbox escape.
+          canUseTool: async (toolName, _input, options) => {
+            console.error(
+              "[DEBUG-rudder-permission-awk]",
+              JSON.stringify({
+                toolName,
+                blockedPath: options.blockedPath,
+                decisionReason: options.decisionReason,
+                matchedAskRule: options.matchedAskRule,
+                title: options.title,
+                displayName: options.displayName,
+                description: options.description,
+              }),
+            );
+            return {
+              behavior: "deny" as const,
+              message:
+                toolName === "AskUserQuestion"
+                  ? "Rudder cannot answer interactive questions; proceed with best judgment."
+                  : toolName === "Bash"
+                    ? "Rudder has no interactive approval surface, and this command could not run inside the sandbox. Other shell commands still work: retry with one that only reads or writes inside the working directory."
+                    : "Rudder has no interactive approval surface for this operation.",
+            };
+          },
         }),
   };
 }

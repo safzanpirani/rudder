@@ -67,7 +67,7 @@ describe("AsyncMessageQueue", () => {
 });
 
 describe("query options", () => {
-  test("maps sandbox modes and fresh/resume identity", () => {
+  test("maps danger-full-access and read-only with fresh/resume identity", () => {
     const fresh = buildQueryOptions({
       id: "fresh-id",
       cwd: "/tmp/project",
@@ -90,6 +90,40 @@ describe("query options", () => {
     expect(resumed.permissionMode).toBe("plan");
     expect(resumed.resume).toBe("resume-id");
     expect(resumed.persistSession).toBe(false);
+  });
+
+  test("runs workspace Bash inside Claude's command sandbox", async () => {
+    const workspace = buildQueryOptions({
+      id: "workspace-id",
+      cwd: "/tmp/project",
+      sandbox: "workspace-write",
+      persistSession: true,
+      resumed: false,
+    });
+
+    expect(workspace.permissionMode).toBe("acceptEdits");
+    expect(workspace.sandbox).toEqual({
+      enabled: true,
+      failIfUnavailable: true,
+      autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false,
+      filesystem: { allowWrite: ["/tmp/project"] },
+    });
+
+    const escalated = await workspace.canUseTool?.(
+      "Bash",
+      { command: "pwd" },
+      {
+        signal: new AbortController().signal,
+        toolUseID: "tool-id",
+        requestId: "request-id",
+      },
+    );
+    expect(escalated?.behavior).toBe("deny");
+    // The Bash denial has to tell the model that other commands still work,
+    // otherwise it concludes the whole shell is unavailable and stops trying.
+    if (escalated?.behavior !== "deny") throw new Error("expected a denial");
+    expect(escalated.message).toContain("Other shell commands still work");
   });
 });
 

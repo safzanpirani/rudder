@@ -108,12 +108,12 @@ Omit `--model` to use Claude Code's configured default. Use
 discoverable, or set `RUDDER_CLAUDE_PATH` to make that choice persistent;
 `--claude-path` takes precedence. Point either at a wrapper script when your
 Claude authentication depends on shell or Keychain setup that a detached
-process does not inherit. `read-only`, `workspace-write`, and `danger-full-access` map to
-Claude's `plan`, `acceptEdits`, and `bypassPermissions` modes respectively.
-Rudder has no interactive approval dialog: approval-requiring operations that
-are not covered by the selected mode are denied instead of hanging. In
-practice this means `workspace-write` lets Claude read and write files but
-denies `Bash`; use `danger-full-access` when the task needs to run commands.
+process does not inherit. `read-only` maps to Claude's `plan` mode.
+`workspace-write` uses `acceptEdits` and enables Claude's command sandbox. It
+automatically allows Bash only when Claude runs the command inside that
+sandbox, adds the working directory to the writable paths, and fails if the
+sandbox is unavailable. `danger-full-access` maps to `bypassPermissions`.
+Rudder denies any operation that still requires interactive approval.
 
 Run it in the background from an agent harness so the harness can continue
 reading user messages and issue steering commands.
