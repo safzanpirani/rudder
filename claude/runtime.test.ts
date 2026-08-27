@@ -110,20 +110,54 @@ describe("query options", () => {
       filesystem: { allowWrite: ["/tmp/project"] },
     });
 
-    const escalated = await workspace.canUseTool?.(
+    const callbackOptions = {
+      signal: new AbortController().signal,
+      toolUseID: "tool-id",
+      requestId: "request-id",
+    };
+    const ambiguousSandboxedCommand = await workspace.canUseTool?.(
       "Bash",
-      { command: "pwd" },
+      { command: "awk '{ print $1 }' inventory.csv" },
+      callbackOptions,
+    );
+    expect(ambiguousSandboxedCommand).toEqual({ behavior: "allow" });
+
+    const sandboxEscape = await workspace.canUseTool?.(
+      "Bash",
+      { command: "pwd", dangerouslyDisableSandbox: true },
+      callbackOptions,
+    );
+    expect(sandboxEscape).toEqual({
+      behavior: "deny",
+      message: "Rudder denied a request to run Bash outside the workspace sandbox.",
+    });
+
+    const blockedPath = await workspace.canUseTool?.(
+      "Bash",
+      { command: "cat ../outside.txt" },
+      { ...callbackOptions, blockedPath: "/tmp/outside.txt" },
+    );
+    expect(blockedPath).toEqual({
+      behavior: "deny",
+      message: "Rudder denied Bash access outside the workspace sandbox.",
+    });
+
+    const explicitAskRule = await workspace.canUseTool?.(
+      "Bash",
+      { command: "make verify" },
       {
-        signal: new AbortController().signal,
-        toolUseID: "tool-id",
-        requestId: "request-id",
+        ...callbackOptions,
+        matchedAskRule: {
+          source: "projectSettings",
+          toolName: "Bash",
+          ruleContent: "Bash(make *)",
+        },
       },
     );
-    expect(escalated?.behavior).toBe("deny");
-    // The Bash denial has to tell the model that other commands still work,
-    // otherwise it concludes the whole shell is unavailable and stops trying.
-    if (escalated?.behavior !== "deny") throw new Error("expected a denial");
-    expect(escalated.message).toContain("Other shell commands still work");
+    expect(explicitAskRule).toEqual({
+      behavior: "deny",
+      message: "Rudder cannot override an explicit interactive approval rule.",
+    });
   });
 });
 

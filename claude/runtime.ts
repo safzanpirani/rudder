@@ -506,29 +506,40 @@ export function buildQueryOptions(thread: ThreadConfig): Options {
     ...(permissionMode === "bypassPermissions"
       ? { allowDangerouslySkipPermissions: true }
       : {
-          // Sandboxed Bash commands bypass this callback. Any request that
-          // reaches it requires an interactive approval or sandbox escape.
-          canUseTool: async (toolName, _input, options) => {
-            console.error(
-              "[DEBUG-rudder-permission-awk]",
-              JSON.stringify({
-                toolName,
-                blockedPath: options.blockedPath,
-                decisionReason: options.decisionReason,
-                matchedAskRule: options.matchedAskRule,
-                title: options.title,
-                displayName: options.displayName,
-                description: options.description,
-              }),
-            );
+          canUseTool: async (toolName, input, options) => {
+            if (toolName === "AskUserQuestion") {
+              return {
+                behavior: "deny" as const,
+                message: "Rudder cannot answer interactive questions; proceed with best judgment.",
+              };
+            }
+            if (toolName === "Bash") {
+              if (input.dangerouslyDisableSandbox === true) {
+                return {
+                  behavior: "deny" as const,
+                  message: "Rudder denied a request to run Bash outside the workspace sandbox.",
+                };
+              }
+              if (options.blockedPath) {
+                return {
+                  behavior: "deny" as const,
+                  message: "Rudder denied Bash access outside the workspace sandbox.",
+                };
+              }
+              if (options.matchedAskRule) {
+                return {
+                  behavior: "deny" as const,
+                  message: "Rudder cannot override an explicit interactive approval rule.",
+                };
+              }
+
+              // The SDK can request approval for commands that its classifier
+              // cannot auto-allow. The active sandbox still confines them.
+              return { behavior: "allow" as const };
+            }
             return {
               behavior: "deny" as const,
-              message:
-                toolName === "AskUserQuestion"
-                  ? "Rudder cannot answer interactive questions; proceed with best judgment."
-                  : toolName === "Bash"
-                    ? "Rudder has no interactive approval surface, and this command could not run inside the sandbox. Other shell commands still work: retry with one that only reads or writes inside the working directory."
-                    : "Rudder has no interactive approval surface for this operation.",
+              message: "Rudder has no interactive approval surface for this operation.",
             };
           },
         }),
