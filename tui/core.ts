@@ -660,13 +660,15 @@ export function parseChatTranscript(
       if (threadId && rootThreads.size > 0 && !rootThreads.has(threadId))
         continue;
       if (item.type === "userMessage") {
-        if (event.method === "item/completed" && item.text)
-          entries.push({ kind: "user", text: item.text });
+        const text = item.text?.trim();
+        if (event.method === "item/completed" && text)
+          entries.push({ kind: "user", text });
         continue;
       }
       if (item.type === "agentMessage") {
-        if (event.method === "item/completed" && item.text)
-          entries.push({ kind: "agent", text: item.text });
+        const text = item.text?.trim();
+        if (event.method === "item/completed" && text)
+          entries.push({ kind: "agent", text });
         continue;
       }
       if (item.type === "reasoning") {
@@ -684,11 +686,13 @@ export function parseChatTranscript(
         item.type === "subAgentActivity"
       ) {
         if (!item.id) continue;
-        const label =
+        const rawLabel =
           item.command ||
           item.query ||
           item.toolName ||
           (item.type === "fileChange" ? "file changes" : item.type);
+        const flat = rawLabel.split(/\s+/).join(" ").trim();
+        const label = flat.length > 160 ? `${flat.slice(0, 160)}…` : flat;
         const status: ToolActivityStatus =
           event.method === "item/started"
             ? "running"

@@ -150,24 +150,6 @@ async function main(): Promise<void> {
     let themePickerOpen = false;
     let themeBeforePicker = activeThemeName;
 
-    const header = new TextRenderable(renderer, {
-      content: "RUDDER  /  SESSIONS",
-      fg: palette.accent,
-      attributes: TextAttributes.BOLD,
-    });
-    const sessionCount = new TextRenderable(renderer, {
-      content: "0 runs",
-      fg: palette.dim,
-    });
-    const headerBar = new BoxRenderable(renderer, {
-      width: "100%",
-      height: 1,
-      flexDirection: "row",
-      justifyContent: "space-between",
-    });
-    headerBar.add(header);
-    headerBar.add(sessionCount);
-
     const sessionList = new SelectRenderable(renderer, {
       id: "sessions",
       flexGrow: 1,
@@ -274,36 +256,38 @@ async function main(): Promise<void> {
     detailsPanel.add(details);
 
     const chatTab = new TextRenderable(renderer, {
-      content: " Chat ",
+      content: "chat",
       fg: palette.accent,
       attributes: TextAttributes.BOLD,
     });
     const activityTab = new TextRenderable(renderer, {
-      content: " Activity ",
+      content: "activity",
       fg: palette.dim,
     });
     const outputTab = new TextRenderable(renderer, {
-      content: " Output ",
+      content: "output",
       fg: palette.dim,
     });
     const tabsLeft = new BoxRenderable(renderer, {
       height: 1,
       flexDirection: "row",
-      gap: 1,
+      gap: 2,
     });
     tabsLeft.add(chatTab);
     tabsLeft.add(activityTab);
     tabsLeft.add(outputTab);
+    // Only speaks up when live-follow is paused; silence is the default.
     const followIndicator = new TextRenderable(renderer, {
-      content: " FOLLOWING ",
-      fg: palette.success,
-      attributes: TextAttributes.BOLD,
+      content: "",
+      fg: palette.warning,
     });
     const tabsBar = new BoxRenderable(renderer, {
       width: "100%",
       height: 1,
       flexDirection: "row",
       justifyContent: "space-between",
+      paddingLeft: 1,
+      paddingRight: 1,
     });
     tabsBar.add(tabsLeft);
     tabsBar.add(followIndicator);
@@ -323,17 +307,16 @@ async function main(): Promise<void> {
         },
       },
     });
+    // Borderless main surface: the conversation floats on the background the
+    // way opencode's does; the prompt input is the only framed element.
     const artifactPanel = new BoxRenderable(renderer, {
       width: "100%",
       flexGrow: 1,
       flexDirection: "column",
       gap: 1,
-      border: true,
-      borderStyle: "rounded",
-      borderColor: palette.border,
-      focusedBorderColor: palette.accent,
-      title: " Timeline ",
-      padding: 1,
+      paddingLeft: 1,
+      paddingRight: 1,
+      paddingTop: 0,
     });
     artifactPanel.add(tabsBar);
     artifactPanel.add(artifactScroll);
@@ -347,17 +330,40 @@ async function main(): Promise<void> {
     body.add(detailsPanel);
     body.add(artifactPanel);
 
-    const statusLine = new TextRenderable(renderer, {
-      content: "Watching for Rudder sessions",
-      fg: palette.dim,
-      height: 1,
-    });
-    const footer = new TextRenderable(renderer, {
+    // Meta line under the input: mode + model on the left, tokens/cost right.
+    const promptMetaLeft = new TextRenderable(renderer, {
       content: "",
       fg: palette.dim,
       height: 1,
     });
-    const footerUsage = new TextRenderable(renderer, {
+    const promptMetaRight = new TextRenderable(renderer, {
+      content: "",
+      fg: palette.dim,
+      height: 1,
+    });
+    const promptMeta = new BoxRenderable(renderer, {
+      width: "100%",
+      height: 1,
+      flexDirection: "row",
+      justifyContent: "space-between",
+      paddingLeft: 1,
+      paddingRight: 1,
+    });
+    promptMeta.add(promptMetaLeft);
+    promptMeta.add(promptMetaRight);
+
+    const statusLine = new TextRenderable(renderer, {
+      content: "",
+      fg: palette.dim,
+      height: 1,
+      paddingLeft: 1,
+    });
+    const footerLeft = new TextRenderable(renderer, {
+      content: "",
+      fg: palette.dim,
+      height: 1,
+    });
+    const footerRight = new TextRenderable(renderer, {
       content: "",
       fg: palette.dim,
       height: 1,
@@ -367,9 +373,11 @@ async function main(): Promise<void> {
       height: 1,
       flexDirection: "row",
       justifyContent: "space-between",
+      paddingLeft: 1,
+      paddingRight: 1,
     });
-    footerBar.add(footer);
-    footerBar.add(footerUsage);
+    footerBar.add(footerLeft);
+    footerBar.add(footerRight);
 
     const searchInput = new InputRenderable(renderer, {
       id: "search-input",
@@ -415,7 +423,6 @@ async function main(): Promise<void> {
       borderStyle: "rounded",
       borderColor: palette.border,
       focusedBorderColor: palette.accent,
-      title: " Prompt ",
       paddingLeft: 1,
       paddingRight: 1,
       backgroundColor: palette.background,
@@ -533,13 +540,12 @@ async function main(): Promise<void> {
       width: "100%",
       height: "100%",
       flexDirection: "column",
-      gap: 1,
       padding: 1,
       backgroundColor: palette.background,
     });
-    root.add(headerBar);
     root.add(body);
     root.add(promptPanel);
+    root.add(promptMeta);
     root.add(statusLine);
     root.add(footerBar);
     root.add(sessionsPanel);
@@ -840,8 +846,6 @@ async function main(): Promise<void> {
       palette = theme.palette;
       renderer.setBackgroundColor(palette.background);
       root.backgroundColor = palette.background;
-      header.fg = palette.accent;
-      sessionCount.fg = palette.dim;
       sessionList.backgroundColor = palette.panel;
       sessionList.focusedBackgroundColor = palette.panel;
       sessionList.textColor = palette.text;
@@ -862,12 +866,12 @@ async function main(): Promise<void> {
           backgroundColor: palette.border,
         },
       };
-      artifactPanel.borderColor = palette.border;
-      artifactPanel.focusedBorderColor = palette.accent;
-      artifactPanel.titleColor = palette.accent;
       statusLine.fg = palette.dim;
-      footer.fg = palette.dim;
-      footerUsage.fg = palette.dim;
+      footerLeft.fg = palette.dim;
+      footerRight.fg = palette.dim;
+      promptMetaLeft.fg = palette.dim;
+      promptMetaRight.fg = palette.dim;
+      followIndicator.fg = palette.warning;
       chatTab.fg = palette.accent;
       sessionsPanel.backgroundColor = palette.background;
       promptPanel.backgroundColor = palette.background;
@@ -1202,39 +1206,46 @@ async function main(): Promise<void> {
 
     function updatePromptChrome(): void {
       const session = selectedSession();
-    const modelLabel =
-    pendingModel && (promptMode === "new" || promptMode === "continue")
-        ? (pendingModel.label ?? pendingModel.id)
-        : (session?.model ?? "default model");
+      const modelLabel =
+        pendingModel && (promptMode === "new" || promptMode === "continue")
+          ? (pendingModel.label ?? pendingModel.id)
+          : (session?.model ?? "");
+      const effort = session?.effort ? ` · ${session.effort}` : "";
+      promptMetaRight.content = sessionUsageSummary(session);
       if (promptMode === "new") {
         const target = pendingResume
           ? `resume ${pendingResume.provider} ${pendingResume.sessionId.slice(0, 12)}…`
-          : `new ${pendingModel?.provider ?? "codex"} session`;
-        promptPanel.title = ` ${target} · ${modelLabel} · Enter start · Esc cancel `;
-        promptInput.placeholder = `First prompt for the ${pendingResume ? "resumed" : "new"} session in ${process.cwd()}…`;
+          : `new session`;
+        promptMetaLeft.content = `${modelLabel || (pendingModel?.provider ?? "codex")} · ${target}`;
+        promptInput.placeholder = "First prompt for the session… (Esc cancels)";
         return;
       }
-    const route =
-    promptMode === "steer" ||
-    promptMode === "prompt" ||
-    promptMode === "continue"
-      ? promptMode
-      : undefined;
+      const route =
+        promptMode === "steer" ||
+        promptMode === "prompt" ||
+        promptMode === "continue"
+          ? promptMode
+          : promptModeForSession(session);
       if (!session || !route) {
-        promptPanel.title = " Prompt · n new session ";
-        promptInput.placeholder = "No promptable session selected — press n to start one";
+        promptMetaLeft.content = "n new session · Tab sessions";
+        promptInput.placeholder = "Ask anything — n starts a new session";
         return;
       }
-      if (promptMode === "continue" || route === "continue") {
-        promptPanel.title = ` continue thread · ${modelLabel} · Enter start · Esc cancel `;
-        promptInput.placeholder = `What should the resumed ${session.provider === "claude" ? "Claude session" : "Codex thread"} do?`;
-      } else if (route === "steer") {
-        promptPanel.title = ` steer active turn · ${modelLabel} · Enter send `;
-        promptInput.placeholder = `New direction for ${session.provider === "claude" ? "Claude" : "Codex"}…`;
-      } else {
-        promptPanel.title = ` prompt idle session · ${modelLabel} · Enter send `;
-        promptInput.placeholder = "Next task for this session…";
-      }
+      const routeLabel =
+        route === "steer"
+          ? "steering active turn"
+          : route === "prompt"
+            ? "ready"
+            : "continues thread";
+      promptMetaLeft.content = [modelLabel, effort ? session.effort : "", routeLabel]
+        .filter(Boolean)
+        .join(" · ");
+      promptInput.placeholder =
+        route === "steer"
+          ? "Send a new direction to the running turn…"
+          : route === "prompt"
+            ? "Ask for changes or a follow-up…"
+            : "Continue this thread in a new run…";
     }
 
     function closePrompt(): void {
@@ -1505,7 +1516,7 @@ async function main(): Promise<void> {
       const liveCount = sessions.filter(isLive).length;
       const historyCount = sessions.length - liveCount;
       const filterSuffix = sessionQuery ? ` · /${sessionQuery}` : "";
-      sessionCount.content = `${liveCount} live · ${historyCount} recent${filterSuffix}`;
+      sessionsPanel.title = ` sessions · ${liveCount} live · ${historyCount} recent${filterSuffix} · Enter open · Esc close `;
       updateDetails();
       updateChrome();
     }
@@ -1541,12 +1552,20 @@ async function main(): Promise<void> {
       if (session.stateDir !== view.selectedStateDir) return;
       if (view.artifact === "chat") {
         const entries = parseChatTranscript(eventContent, session.threadId);
-        const rows = entries.map((entry, index) => ({
-          id: `chat:${entry.itemId ?? index}`,
-          chat: entry,
-          text: entry.text,
-          copyText: entry.text,
-        }));
+        const rows: ActivityRow[] = [];
+        for (const [index, entry] of entries.entries()) {
+          const previous = entries[index - 1];
+          // Breathing room: a blank line before each speaker change keeps the
+          // transcript readable the way opencode's conversation flow is.
+          if (previous && entry.kind !== previous.kind)
+            rows.push({ id: `chat-gap:${index}`, text: "", copyText: "" });
+          rows.push({
+            id: `chat:${entry.itemId ?? index}`,
+            chat: entry,
+            text: entry.text,
+            copyText: entry.text,
+          });
+        }
         setArtifactRows(
           rows.length > 0
             ? rows
@@ -1645,6 +1664,7 @@ async function main(): Promise<void> {
         const renderable = new TextRenderable(renderer, {
           id: `artifact-row-${index}`,
           width: "100%",
+          wrapMode: "word",
           content: renderArtifactRow(row, match, index === selectedRow),
           fg: palette.text,
           // Activity is a structured list: mouse gestures select/expand rows.
@@ -1834,37 +1854,56 @@ async function main(): Promise<void> {
         tab.attributes = selected ? TextAttributes.BOLD : TextAttributes.NONE;
       }
       followIndicator.content = artifactFollowing
-        ? " FOLLOWING "
-        : ` PAUSED${unseenRows > 0 ? ` · ${unseenRows} new` : ""} · End resume `;
-      followIndicator.fg = artifactFollowing
-        ? palette.success
-        : palette.warning;
+        ? ""
+        : `paused${unseenRows > 0 ? ` · ${unseenRows} new` : ""} · End resumes`;
       const session = selectedSession();
       const query = artifactQueries[view.artifact];
-      const project = session
-        ? sessionLabel(session).replace(/^\S+\s+/, "")
-        : "no session";
-      artifactPanel.title = query
-        ? ` ${project} · /${query} `
-        : ` ${project} `;
       sessionsPanel.borderColor =
         view.focus === "sessions" ? palette.accent : palette.border;
-      artifactPanel.borderColor =
-        view.focus === "artifact" ? palette.accent : palette.border;
-      footer.content = contextualHelp(
+      footerLeft.content = sessionLocationSummary(session);
+      footerRight.content = contextualHelp(
         view.focus,
         session,
         Boolean(query),
         dejaAvailable,
       );
-      footerUsage.content = sessionUsageSummary(session);
       updatePromptChrome();
+    }
+
+    // "~/dev/rudder:main" for the footer's left corner, opencode style.
+    const branchByCwd = new Map<string, string>();
+    function sessionLocationSummary(session: Session | undefined): string {
+      const cwd = session?.cwd ?? process.cwd();
+      const home = process.env.HOME ?? "";
+      const shortCwd =
+        home && cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
+      const branch = branchByCwd.get(cwd);
+      if (branch === undefined) {
+        branchByCwd.set(cwd, "");
+        void (async () => {
+          try {
+            const child = Bun.spawn(
+              ["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
+              { stdout: "pipe", stderr: "ignore" },
+            );
+            const [name, exitCode] = await Promise.all([
+              new Response(child.stdout).text(),
+              child.exited,
+            ]);
+            if (exitCode === 0 && name.trim())
+              branchByCwd.set(cwd, name.trim());
+            updateChrome();
+          } catch {
+            // Not a git checkout; the bare path is enough.
+          }
+        })();
+      }
+      return branch ? `${shortCwd}:${branch}` : shortCwd;
     }
 
     function sessionUsageSummary(session: Session | undefined): string {
       if (!session) return "";
       const parts: string[] = [];
-      if (session.model) parts.push(session.model);
       const usage = formatTokenUsage(session.tokenUsage);
       if (usage) parts.push(usage);
       parts.push(session.status);
@@ -1959,15 +1998,15 @@ function sessionStatusColor(status: string): string {
 
 function renderChatEntry(entry: ChatEntry): StyledText {
   if (entry.kind === "user")
-    return t`${bold(fg(palette.accent)("❯"))} ${bold(fg(palette.text)(entry.text))}`;
+    return t`${bold(fg(palette.accent)("❯ "))}${bold(fg(palette.text)(entry.text))}`;
   if (entry.kind === "agent") return t`${fg(palette.text)(entry.text)}`;
   if (entry.kind === "thought")
     return t`${italic(fg(palette.dim)(entry.text))}`;
   const status = entry.status ?? "running";
-  const glyph = status === "completed" ? "✓" : status === "failed" ? "×" : "◐";
+  const glyph = status === "completed" ? "•" : status === "failed" ? "×" : "◐";
   const color =
     status === "completed"
-      ? palette.success
+      ? palette.dim
       : status === "failed"
         ? palette.danger
         : palette.warning;
@@ -2095,18 +2134,14 @@ function contextualHelp(
   hasQuery: boolean,
   dejaAvailable = false,
 ): string {
-  const find = dejaAvailable ? "   f find past" : "";
+  const find = dejaAvailable ? " · f find" : "";
   if (focus === "sessions")
-    return `j/k select   / filter   Enter open   Esc close   q quit`;
+    return "j/k select · / filter · Enter open · Esc close";
   const action =
-    session?.status === "active"
-      ? "s steer   x x stop"
-      : session?.status === "idle"
-        ? "s prompt   x x stop"
-        : session
-          ? "s continue"
-          : "";
-  return `s prompt   n new   m model${find}   ${action ? `${action}   ` : ""}o view   i info   Tab sessions   t theme   q quit`;
+    session?.status === "active" || session?.status === "idle"
+      ? " · x x stop"
+      : "";
+  return `s prompt · n new · m model${find}${action} · Tab sessions · q quit`;
 }
 
 function isLive(session: Session): boolean {
