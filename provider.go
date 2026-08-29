@@ -40,7 +40,7 @@ func configureProviderDefaults(cfg *runConfig, childArgs []string) error {
 	switch provider {
 	case providerCodex:
 		if cfg.Model == "" {
-			cfg.Model = "gpt-5.6-sol"
+			cfg.Model = defaultModel(providerCodex)
 		}
 		if len(childArgs) > 0 {
 			cfg.ChildCommand = childArgs

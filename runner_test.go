@@ -910,9 +910,10 @@ func (w *blockingWriteCloser) Close() error {
 func TestRPCCallBoundsBlockedStdinWrite(t *testing.T) {
 	writer := &blockingWriteCloser{closed: make(chan struct{})}
 	r := &controller{
-		childIn: writer,
-		pending: make(map[string]chan rpcEnvelope),
-		done:    make(chan struct{}),
+		childIn:     writer,
+		pending:     make(map[string]chan rpcEnvelope),
+		turnDone:    make(chan struct{}),
+		sessionDone: make(chan struct{}),
 	}
 	errCh := make(chan error, 1)
 	go func() {
@@ -960,9 +961,10 @@ func TestControlAcceptRetriesTemporaryFailure(t *testing.T) {
 	server, client := net.Pipe()
 	defer client.Close()
 	r := &controller{
-		listener: &sequenceListener{conn: server},
-		store:    &stateStore{state: runState{Status: "active"}},
-		done:     make(chan struct{}),
+		listener:    &sequenceListener{conn: server},
+		store:       &stateStore{state: runState{Status: "active"}},
+		turnDone:    make(chan struct{}),
+		sessionDone: make(chan struct{}),
 	}
 	go r.acceptControl()
 	_ = client.SetDeadline(time.Now().Add(time.Second))
@@ -1023,6 +1025,47 @@ func TestRunPreservesAgentMessagesAndRedactsPersistedError(t *testing.T) {
 	}
 	if state.Error == "" || !strings.Contains(state.Error, "see trace.log") {
 		t.Fatalf("state error is not a useful redacted diagnostic: %q", state.Error)
+	}
+}
+
+func TestNestedTurnLifecycleDoesNotReplaceOrCompleteRootTurn(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.md")
+	stateDir := filepath.Join(dir, "run")
+	if err := os.WriteFile(promptPath, []byte("delegate and finish"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDER_NESTED_TURN", "1")
+	err := runController(runConfig{
+		CWD:            dir,
+		PromptFile:     promptPath,
+		StateDir:       stateDir,
+		Model:          "test-model",
+		Sandbox:        "read-only",
+		ApprovalPolicy: "never",
+		ChildCommand:   []string{os.Args[0], "-test.run=TestNestedTurnLifecycleDoesNotReplaceOrCompleteRootTurn"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := readState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ThreadID != "thread-test" || state.TurnID != "turn-test" {
+		t.Fatalf("nested lifecycle replaced root identity: thread=%q turn=%q", state.ThreadID, state.TurnID)
+	}
+	output, err := os.ReadFile(filepath.Join(stateDir, "output.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(output)) != "ROOT DONE" {
+		t.Fatalf("output = %q, want root output after nested completion", output)
 	}
 }
 
@@ -1213,6 +1256,8 @@ func runHelperAppServer() {
 	}
 	scanner := bufio.NewScanner(os.Stdin)
 	enc := json.NewEncoder(os.Stdout)
+	turnCounter := 0
+	currentTurn := "turn-test"
 	for scanner.Scan() {
 		var request struct {
 			ID     string         `json:"id"`
@@ -1297,8 +1342,39 @@ func runHelperAppServer() {
 		case "thread/unarchive":
 			_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{"thread": map[string]any{"id": request.Params["threadId"]}}})
 		case "turn/start":
+			if os.Getenv("GO_WANT_RUDDER_MULTI_TURN") == "1" {
+				turnCounter++
+				currentTurn = fmt.Sprintf("turn-%d", turnCounter)
+				if os.Getenv("GO_WANT_RUDDER_DELAY_TURN_START") == "1" {
+					time.Sleep(200 * time.Millisecond)
+				}
+				_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{"turn": map[string]any{"id": currentTurn, "status": "inProgress"}}})
+				_ = enc.Encode(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": "thread-test", "turn": map[string]any{"id": currentTurn, "status": "inProgress"}}})
+				if os.Getenv("GO_WANT_RUDDER_MULTI_TURN_HOLD") != "1" {
+					_ = enc.Encode(map[string]any{"method": "thread/tokenUsage/updated", "params": map[string]any{
+						"threadId": "thread-test",
+						"tokenUsage": map[string]any{
+							"total":              map[string]any{"totalTokens": 100 * turnCounter, "inputTokens": 80 * turnCounter, "cachedInputTokens": 10 * turnCounter, "outputTokens": 20 * turnCounter},
+							"modelContextWindow": 1000,
+						},
+					}})
+					_ = enc.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"item": map[string]any{"id": fmt.Sprintf("message-%d", turnCounter), "type": "agentMessage", "text": fmt.Sprintf("TURN %d", turnCounter)}}})
+					_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": currentTurn, "status": "completed"}}})
+					if os.Getenv("GO_WANT_RUDDER_EXIT_AFTER_TURN") == "1" {
+						return
+					}
+				}
+				continue
+			}
 			_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{"turn": map[string]any{"id": "turn-test", "status": "inProgress"}}})
-			_ = enc.Encode(map[string]any{"method": "turn/started", "params": map[string]any{"turn": map[string]any{"id": "turn-test", "status": "inProgress"}}})
+			_ = enc.Encode(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": "thread-test", "turn": map[string]any{"id": "turn-test", "status": "inProgress"}}})
+			if os.Getenv("GO_WANT_RUDDER_NESTED_TURN") == "1" {
+				_ = enc.Encode(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": "thread-child", "turn": map[string]any{"id": "turn-child", "status": "inProgress"}}})
+				_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "thread-child", "turn": map[string]any{"id": "turn-child", "status": "completed"}}})
+				_ = enc.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": "thread-test", "turnId": "turn-test", "item": map[string]any{"id": "message-root", "type": "agentMessage", "text": "ROOT DONE"}}})
+				_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "thread-test", "turn": map[string]any{"id": "turn-test", "status": "completed"}}})
+				continue
+			}
 			if os.Getenv("GO_WANT_RUDDER_MULTI_OUTPUT_ERROR") == "1" {
 				_ = enc.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"item": map[string]any{"id": "message-first", "type": "agentMessage", "text": "FIRST"}}})
 				_ = enc.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"item": map[string]any{"id": "message-second", "type": "agentMessage", "text": "SECOND"}}})
@@ -1310,23 +1386,434 @@ func runHelperAppServer() {
 				_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": "turn-test", "status": "completed"}}})
 			}
 		case "turn/steer":
-			if request.Params["expectedTurnId"] != "turn-test" {
+			expectedTurn := "turn-test"
+			if os.Getenv("GO_WANT_RUDDER_MULTI_TURN") == "1" {
+				expectedTurn = currentTurn
+			}
+			if request.Params["threadId"] != "thread-test" || request.Params["expectedTurnId"] != expectedTurn {
 				_ = enc.Encode(map[string]any{"id": request.ID, "error": map[string]any{"code": -32600, "message": "wrong turn"}})
 				continue
 			}
-			_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{"turnId": "turn-test"}})
+			_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{"turnId": expectedTurn}})
 			_ = enc.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"item": map[string]any{"id": "message-test", "type": "agentMessage", "text": "STEERED"}}})
-			_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": "turn-test", "status": "completed"}}})
+			_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": expectedTurn, "status": "completed"}}})
 		case "turn/interrupt":
+			if os.Getenv("GO_WANT_RUDDER_INTERRUPT_COMPLETE_FIRST") == "1" {
+				_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": currentTurn, "status": "interrupted"}}})
+			}
 			_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{}})
 			if os.Getenv("GO_WANT_RUDDER_INTERRUPT_ACK_ONLY") == "1" {
 				continue
 			}
-			_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": "turn-test", "status": "interrupted"}}})
+			if os.Getenv("GO_WANT_RUDDER_INTERRUPT_COMPLETE_FIRST") != "1" {
+				_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": currentTurn, "status": "interrupted"}}})
+			}
 		default:
 			if request.ID != "" {
 				_ = enc.Encode(map[string]any{"id": request.ID, "error": map[string]any{"code": -32601, "message": fmt.Sprintf("unsupported %s", request.Method)}})
 			}
 		}
+	}
+}
+
+func startIdleHelperRun(t *testing.T, extraEnv map[string]string, cfgMutate func(*runConfig)) (string, chan error) {
+	return startIdleHelperRunContext(t, context.Background(), extraEnv, cfgMutate)
+}
+
+func startIdleHelperRunContext(t *testing.T, ctx context.Context, extraEnv map[string]string, cfgMutate func(*runConfig)) (string, chan error) {
+	t.Helper()
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.md")
+	stateDir := filepath.Join(dir, "run")
+	if err := os.WriteFile(promptPath, []byte("FIRST SECRET TASK"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDER_MULTI_TURN", "1")
+	for key, value := range extraEnv {
+		t.Setenv(key, value)
+	}
+	cfg := runConfig{
+		CWD:            dir,
+		PromptFile:     promptPath,
+		StateDir:       stateDir,
+		Model:          "test-model",
+		Sandbox:        "read-only",
+		ApprovalPolicy: "never",
+		Idle:           true,
+		IdleTimeout:    time.Minute,
+		ChildCommand:   []string{os.Args[0], "-test.run=TestIdlePromptStartsSecondTurn"},
+	}
+	if cfgMutate != nil {
+		cfgMutate(&cfg)
+	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- runControllerContext(ctx, cfg) }()
+	return stateDir, errCh
+}
+
+func TestIdlePromptStartsSecondTurn(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	stateDir, errCh := startIdleHelperRun(t, nil, nil)
+	waitForRunStatus(t, stateDir, "idle")
+	response, err := sendControl(stateDir, controlRequest{Command: "prompt", Text: "SECOND SECRET TASK"}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK {
+		t.Fatalf("prompt failed: %s", response.Error)
+	}
+	state := waitForRunStatus(t, stateDir, "idle")
+	if state.Turns != 2 {
+		t.Fatalf("turns = %d, want 2", state.Turns)
+	}
+	if state.TokenUsage == nil || state.TokenUsage.TotalTokens != 200 || state.TokenUsage.ContextWindow != 1000 {
+		t.Fatalf("token usage not persisted: %#v", state.TokenUsage)
+	}
+	raw, err := os.ReadFile(filepath.Join(stateDir, stateFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "SECRET TASK") {
+		t.Fatal("state file persisted prompt text")
+	}
+	output, err := os.ReadFile(filepath.Join(stateDir, "output.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "TURN 1\n\n---\n\nTURN 2"; !strings.Contains(string(output), want) {
+		t.Fatalf("output = %q, want to contain %q", output, want)
+	}
+	events, err := os.ReadFile(filepath.Join(stateDir, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(events), `"userMessage"`) || !strings.Contains(string(events), "SECOND SECRET TASK") {
+		t.Fatal("events.jsonl is missing the synthetic userMessage items")
+	}
+	stopResponse, err := sendControl(stateDir, controlRequest{Command: "shutdown"}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stopResponse.OK {
+		t.Fatalf("shutdown failed: %s", stopResponse.Error)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	final, err := readState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Status != "completed" || final.CompletedAt.IsZero() {
+		t.Fatalf("unexpected final state: %#v", final)
+	}
+}
+
+func TestSteerRejectedWhileIdleAndPromptNeverConverts(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	stateDir, errCh := startIdleHelperRun(t, nil, nil)
+	waitForRunStatus(t, stateDir, "idle")
+	response, err := sendControl(stateDir, controlRequest{Command: "steer", Text: "nope"}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.OK || !strings.Contains(response.Error, "not steerable") {
+		t.Fatalf("steer while idle = %#v", response)
+	}
+	state, err := readState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Turns != 1 {
+		t.Fatalf("rejected steer started a turn: %#v", state)
+	}
+	if _, err := sendControl(stateDir, controlRequest{Command: "shutdown"}, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPromptRejectedWhileActiveAndInterruptReturnsToIdle(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	stateDir, errCh := startIdleHelperRun(t, map[string]string{
+		"GO_WANT_RUDDER_MULTI_TURN_HOLD":          "1",
+		"GO_WANT_RUDDER_INTERRUPT_COMPLETE_FIRST": "1",
+	}, nil)
+	active := waitForRunStatus(t, stateDir, "active")
+	childPID := active.ChildPID
+	response, err := sendControl(stateDir, controlRequest{Command: "prompt", Text: "too early"}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.OK || !strings.Contains(response.Error, "steer it instead") {
+		t.Fatalf("prompt while active = %#v", response)
+	}
+	if response, err = sendControl(stateDir, controlRequest{Command: "interrupt"}, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK {
+		t.Fatalf("interrupt failed: %s", response.Error)
+	}
+	waitForRunStatus(t, stateDir, "idle")
+	if !processAlive(childPID) {
+		t.Fatal("idle-mode interrupt killed the provider child")
+	}
+	if response, err = sendControl(stateDir, controlRequest{Command: "prompt", Text: "after interrupt"}, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK {
+		t.Fatalf("prompt after interrupt failed: %s", response.Error)
+	}
+	state := waitForRunStatus(t, stateDir, "active")
+	if state.Turns != 2 {
+		t.Fatalf("turns = %d, want 2", state.Turns)
+	}
+	if response, err = sendControl(stateDir, controlRequest{Command: "interrupt"}, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK {
+		t.Fatalf("second interrupt failed: %s", response.Error)
+	}
+	waitForRunStatus(t, stateDir, "idle")
+	if _, err := sendControl(stateDir, controlRequest{Command: "shutdown"}, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errCh; err == nil {
+		t.Fatal("run with an interrupted final turn unexpectedly returned nil")
+	}
+	final, err := readState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Status != "interrupted" {
+		t.Fatalf("final status = %q, want interrupted", final.Status)
+	}
+}
+
+func TestSecondTurnSteerCarriesCurrentThreadAndTurn(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	stateDir, errCh := startIdleHelperRun(t, map[string]string{"GO_WANT_RUDDER_MULTI_TURN_HOLD": "1"}, nil)
+	waitForRunStatus(t, stateDir, "active")
+	if response, err := sendControl(stateDir, controlRequest{Command: "interrupt"}, 5*time.Second); err != nil || !response.OK {
+		t.Fatalf("interrupt response = %#v, err=%v", response, err)
+	}
+	waitForRunStatus(t, stateDir, "idle")
+	if response, err := sendControl(stateDir, controlRequest{Command: "prompt", Text: "second turn"}, 5*time.Second); err != nil || !response.OK {
+		t.Fatalf("prompt response = %#v, err=%v", response, err)
+	}
+	state := waitForRunStatus(t, stateDir, "active")
+	if state.TurnID != "turn-2" {
+		t.Fatalf("turn id = %q, want turn-2", state.TurnID)
+	}
+	if response, err := sendControl(stateDir, controlRequest{Command: "steer", Text: "new direction"}, 5*time.Second); err != nil || !response.OK {
+		t.Fatalf("steer response = %#v, err=%v", response, err)
+	}
+	waitForRunStatus(t, stateDir, "idle")
+	if _, err := sendControl(stateDir, controlRequest{Command: "shutdown"}, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPromptRejectedWithoutIdleFlag(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	stateDir, errCh := startIdleHelperRun(t, map[string]string{"GO_WANT_RUDDER_MULTI_TURN_HOLD": "1"}, func(cfg *runConfig) {
+		cfg.Idle = false
+	})
+	waitForRunStatus(t, stateDir, "active")
+	response, err := sendControl(stateDir, controlRequest{Command: "prompt", Text: "nope"}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.OK || !strings.Contains(response.Error, "--idle") {
+		t.Fatalf("prompt without idle flag = %#v", response)
+	}
+	if _, err := sendControl(stateDir, controlRequest{Command: "interrupt"}, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	<-errCh
+}
+
+func TestIdleTimeoutExitsWithLastStatus(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	stateDir, errCh := startIdleHelperRun(t, nil, func(cfg *runConfig) {
+		cfg.IdleTimeout = 200 * time.Millisecond
+	})
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("idle timeout did not end the run")
+	}
+	final, err := readState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Status != "completed" || final.CompletedAt.IsZero() {
+		t.Fatalf("unexpected final state: %#v", final)
+	}
+}
+
+func TestChildExitWhileIdleFailsSession(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	stateDir, errCh := startIdleHelperRun(t, map[string]string{"GO_WANT_RUDDER_EXIT_AFTER_TURN": "1"}, nil)
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("run unexpectedly succeeded after the provider died while idle")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider death while idle did not end the run")
+	}
+	final, err := readState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Status != "failed" {
+		t.Fatalf("final status = %q, want failed", final.Status)
+	}
+}
+
+func TestIdleContextCancellationPersistsInterrupted(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stateDir, errCh := startIdleHelperRunContext(t, ctx, nil, nil)
+	waitForRunStatus(t, stateDir, "idle")
+	cancel()
+	if err := <-errCh; err == nil || !strings.Contains(err.Error(), "interrupted") {
+		t.Fatalf("unexpected cancellation result: %v", err)
+	}
+	state, err := readState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != "interrupted" {
+		t.Fatalf("status = %q, want interrupted", state.Status)
+	}
+}
+
+func TestConcurrentIdlePromptsAcceptOneGeneration(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	stateDir, errCh := startIdleHelperRun(t, map[string]string{"GO_WANT_RUDDER_DELAY_TURN_START": "1"}, nil)
+	waitForRunStatus(t, stateDir, "idle")
+	type result struct {
+		response controlResponse
+		err      error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for _, text := range []string{"second-a", "second-b"} {
+		go func(message string) {
+			<-start
+			response, err := sendControl(stateDir, controlRequest{Command: "prompt", Text: message}, 5*time.Second)
+			results <- result{response: response, err: err}
+		}(text)
+	}
+	close(start)
+	accepted := 0
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if result.response.OK {
+			accepted++
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("accepted prompts = %d, want 1", accepted)
+	}
+	state := waitForRunStatus(t, stateDir, "idle")
+	if state.Turns != 2 {
+		t.Fatalf("turns = %d, want 2", state.Turns)
+	}
+	if _, err := sendControl(stateDir, controlRequest{Command: "shutdown"}, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestShutdownRejectsLaterPrompt(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	stateDir, errCh := startIdleHelperRun(t, nil, nil)
+	waitForRunStatus(t, stateDir, "idle")
+	response, err := sendControl(stateDir, controlRequest{Command: "shutdown"}, 5*time.Second)
+	if err != nil || !response.OK {
+		t.Fatalf("shutdown response = %#v, err=%v", response, err)
+	}
+	if response, promptErr := sendControl(stateDir, controlRequest{Command: "prompt", Text: "too late"}, 5*time.Second); promptErr == nil && response.OK {
+		t.Fatalf("prompt was accepted after shutdown: %#v", response)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	state, err := readState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Turns != 1 || state.Status != "completed" {
+		t.Fatalf("unexpected final state: %#v", state)
+	}
+}
+
+func TestSessionEndingStatusOverridesLastTurn(t *testing.T) {
+	dir := t.TempDir()
+	store, err := newStateStore(runConfig{
+		Provider: providerCodex,
+		CWD:      dir,
+		StateDir: filepath.Join(dir, "run"),
+		Model:    "test-model",
+		Sandbox:  "read-only",
+		Idle:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &controller{store: store, turnDone: make(chan struct{}), sessionDone: make(chan struct{})}
+	if !r.finishTurn("completed", "") {
+		t.Fatal("turn did not finish")
+	}
+	r.endSession("interrupted", "")
+	if state := store.snapshot(); state.Status != "interrupted" {
+		t.Fatalf("status = %q, want interrupted", state.Status)
 	}
 }

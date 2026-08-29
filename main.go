@@ -46,6 +46,12 @@ func runCLIContext(ctx context.Context, args []string) error {
 		return tuiCommand(args[1:])
 	case "steer":
 		return steerCommand(args[1:])
+	case "prompt":
+		return promptCommand(args[1:])
+	case "stop":
+		return stopCommand(args[1:])
+	case "models":
+		return modelsCommand(args[1:])
 	case "status":
 		return statusCommand(args[1:])
 	case "peek":
@@ -88,7 +94,9 @@ func runCommandContext(ctx context.Context, args []string) error {
 	fs.StringVar(&cfg.ForkThreadID, "fork-thread", "", "fork this thread before starting the turn")
 	fs.StringVar(&cfg.ForkBeforeTurnID, "fork-before-turn", "", "when forking, exclude this turn and everything after it")
 	fs.StringVar(&cfg.ForkThroughTurnID, "fork-through-turn", "", "when forking, include history through this turn")
-	fs.DurationVar(&cfg.TurnTimeout, "turn-timeout", time.Hour, "maximum active turn duration; zero disables the watchdog")
+	fs.DurationVar(&cfg.TurnTimeout, "turn-timeout", time.Hour, "maximum active turn duration, applied per turn; zero disables the watchdog")
+	fs.BoolVar(&cfg.Idle, "idle", false, "stay alive after a turn completes and accept prompt commands on the control socket")
+	fs.DurationVar(&cfg.IdleTimeout, "idle-timeout", 4*time.Hour, "exit after this long idle; zero disables")
 	cfg.RegisterRun = true
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -147,6 +155,77 @@ func steerCommand(args []string) error {
 		return errors.New(response.Error)
 	}
 	fmt.Printf("steered turn %s\n", response.State.TurnID)
+	return nil
+}
+
+func promptCommand(args []string) error {
+	fs := flag.NewFlagSet("prompt", flag.ContinueOnError)
+	var stateDir, messageFile string
+	var timeout time.Duration
+	fs.StringVar(&stateDir, "state-dir", "", "Rudder run state directory")
+	fs.StringVar(&messageFile, "message-file", "", "read prompt text from this file")
+	fs.DurationVar(&timeout, "timeout", 60*time.Second, "control request timeout")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if stateDir == "" {
+		return errors.New("--state-dir is required")
+	}
+	var message string
+	if messageFile != "" {
+		raw, err := os.ReadFile(messageFile)
+		if err != nil {
+			return err
+		}
+		message = strings.TrimSpace(string(raw))
+	} else {
+		message = strings.TrimSpace(strings.Join(fs.Args(), " "))
+	}
+	if message == "" {
+		return errors.New("prompt text is required")
+	}
+	state, err := readState(stateDir)
+	if err != nil {
+		return err
+	}
+	state = displayedState(state)
+	if state.Status != "idle" {
+		if state.Status == "active" {
+			return errors.New("a turn is active; use steer")
+		}
+		return fmt.Errorf("session is not idle: status=%s", state.Status)
+	}
+	response, err := sendControl(stateDir, controlRequest{Command: "prompt", Text: message}, timeout)
+	if err != nil {
+		return err
+	}
+	if !response.OK {
+		return errors.New(response.Error)
+	}
+	fmt.Printf("started turn %s\n", response.State.TurnID)
+	return nil
+}
+
+func stopCommand(args []string) error {
+	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
+	var stateDir string
+	var timeout time.Duration
+	fs.StringVar(&stateDir, "state-dir", "", "Rudder run state directory")
+	fs.DurationVar(&timeout, "timeout", 30*time.Second, "control request timeout")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if stateDir == "" {
+		return errors.New("--state-dir is required")
+	}
+	response, err := sendControl(stateDir, controlRequest{Command: "shutdown"}, timeout)
+	if err != nil {
+		return err
+	}
+	if !response.OK {
+		return errors.New(response.Error)
+	}
+	fmt.Println("shutdown requested")
 	return nil
 }
 
@@ -270,14 +349,17 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `Rudder - live steering for Codex and Claude Code
 
 Usage:
-  %s run [--provider codex|claude] --prompt-file FILE --state-dir DIR [options]
+  %[1]s run [--provider codex|claude] --prompt-file FILE --state-dir DIR [options]
          [-- APP_SERVER_COMMAND...]
-  %s thread list|search|read|turns|fork|name|archive|unarchive [options]
-  %s tui [--root DIR] [--state-dir DIR] [--all] [--theme NAME]
-  %s steer --state-dir DIR "new direction"
-  %s status --state-dir DIR [--json]
-  %s peek --state-dir DIR [-n 25]
-  %s interrupt --state-dir DIR
-  %s wait --state-dir DIR [--timeout 10m]
-`, name, name, name, name, name, name, name, name)
+  %[1]s thread list|search|read|turns|fork|name|archive|unarchive [options]
+  %[1]s tui [--root DIR] [--state-dir DIR] [--all] [--theme NAME]
+  %[1]s steer --state-dir DIR "new direction"
+  %[1]s prompt --state-dir DIR "next task"      (idle sessions started with --idle)
+  %[1]s stop --state-dir DIR                    (gracefully end an idle session)
+  %[1]s models [--json]
+  %[1]s status --state-dir DIR [--json]
+  %[1]s peek --state-dir DIR [-n 25]
+  %[1]s interrupt --state-dir DIR
+  %[1]s wait --state-dir DIR [--timeout 10m]
+`, name)
 }

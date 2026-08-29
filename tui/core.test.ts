@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   artifactAllowsTextSelection,
+  AsyncTaskGate,
+  attachToolDetails,
   discoverSessions,
   compactSessionDetails,
   continuationRunArguments,
@@ -19,8 +21,24 @@ import {
   statusGlyph,
   visibleArtifactTail,
   visibleSessions,
+  formatTokenUsage,
+  promptModeForSession,
+  modelPickerOptions,
+  parseModelCatalog,
+  newSessionRunArguments,
+  parseDejaHits,
+  parseChatTranscript,
+  FALLBACK_MODELS,
   type Session,
 } from "./core";
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 function session(overrides: Partial<Session> = {}): Session {
   return {
@@ -63,10 +81,35 @@ describe("view reducer", () => {
     state = reduceView(state, { type: "open-steer" });
     state = reduceView(state, { type: "arm-interrupt", now: 100 });
     expect(state).toMatchObject({
-      artifact: "output",
+      artifact: "trace",
       focus: "steer",
       interruptArmedUntil: 2100,
     });
+  });
+});
+
+describe("async task gate", () => {
+  test("waits for an active refresh and rejects new work before teardown", async () => {
+    const gate = new AsyncTaskGate();
+    const active = deferred();
+    let secondTaskRan = false;
+    const firstRun = gate.run(() => active.promise);
+
+    let stopped = false;
+    const stopping = gate.stop().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    await gate.run(async () => {
+      secondTaskRan = true;
+    });
+    expect(secondTaskRan).toBe(false);
+
+    active.resolve();
+    await Promise.all([firstRun, stopping]);
+    expect(stopped).toBe(true);
   });
 });
 
@@ -339,6 +382,106 @@ describe("artifact and display helpers", () => {
     ]);
   });
 
+  test("joins sub-agent activity to the child final response", () => {
+    const events = [
+      JSON.stringify({
+        method: "item/started",
+        emittedAtMs: 1787942847416,
+        params: {
+          threadId: "parent-thread",
+          item: {
+            id: "subagent-completed-child-turn",
+            type: "subAgentActivity",
+            kind: "completed",
+            agentThreadId: "child-thread",
+            agentPath: "/root/tests_review",
+          },
+        },
+      }),
+      JSON.stringify({
+        method: "item/completed",
+        emittedAtMs: 1787942847000,
+        params: {
+          threadId: "child-thread",
+          item: {
+            id: "child-message",
+            type: "agentMessage",
+            phase: "final_answer",
+            text: "Child review found no issues.",
+          },
+        },
+      }),
+      JSON.stringify({
+        method: "item/completed",
+        emittedAtMs: 1787942847417,
+        params: {
+          threadId: "parent-thread",
+          item: {
+            id: "subagent-completed-child-turn",
+            type: "subAgentActivity",
+            kind: "completed",
+            agentThreadId: "child-thread",
+            agentPath: "/root/tests_review",
+          },
+        },
+      }),
+      JSON.stringify({
+        method: "turn/completed",
+        params: {
+          threadId: "child-thread",
+          turn: { status: "completed", durationMs: 121565 },
+        },
+      }),
+    ].join("\n");
+
+    expect(parseToolEventDetails(events)).toEqual([
+      expect.objectContaining({
+        id: "subagent-completed-child-turn",
+        type: "subAgentActivity",
+        command: "/root/tests_review",
+        status: "completed",
+        output: "Child review found no issues.",
+        durationMs: 121565,
+        toolName: "subAgentActivity",
+        agentThreadId: "child-thread",
+        agentPath: "/root/tests_review",
+        activityKind: "completed",
+        timestampMs: 1787942847417,
+      }),
+    ]);
+  });
+
+  test("matches bounded-tail sub-agent details to the newest trace rows", () => {
+    const activities = parseTraceActivities(
+      [
+        "2026-08-28T18:45:21Z [completed] subAgentActivity",
+        "2026-08-28T18:45:25Z [completed] subAgentActivity",
+        "2026-08-28T18:47:22Z [completed] subAgentActivity",
+        "2026-08-28T18:47:27Z [completed] subAgentActivity",
+      ].join("\n"),
+    );
+    const details = [
+      {
+        id: "interacted",
+        type: "subAgentActivity",
+        status: "completed" as const,
+        toolName: "subAgentActivity",
+        timestampMs: Date.parse("2026-08-28T18:47:22.964Z"),
+      },
+      {
+        id: "completed",
+        type: "subAgentActivity",
+        status: "completed" as const,
+        toolName: "subAgentActivity",
+        timestampMs: Date.parse("2026-08-28T18:47:27.417Z"),
+      },
+    ];
+
+    expect(
+      attachToolDetails(activities, details).map((detail) => detail?.id),
+    ).toEqual([undefined, undefined, "interacted", "completed"]);
+  });
+
   test("filters sessions across project, ids, status, and model", () => {
     const runs = [
       session({
@@ -386,6 +529,7 @@ describe("artifact and display helpers", () => {
       "danger-full-access",
       "--approval-policy",
       "never",
+      "--idle",
       "--model",
       "gpt-parser",
       "--effort",
@@ -449,5 +593,132 @@ describe("artifact and display helpers", () => {
       completedAt: "0001-01-01T00:00:00Z",
     });
     expect(sessionDetails(value)).not.toContain("runtime  0s");
+  });
+});
+
+describe("promptable TUI helpers", () => {
+  test("formats token usage like opencode's footer", () => {
+    expect(
+      formatTokenUsage({ totalTokens: 186_100, contextWindow: 1_000_000, costUsd: 0.1 }),
+    ).toBe("186.1K (19%) · $0.10");
+    expect(formatTokenUsage({ totalTokens: 2_400 })).toBe("2.4K");
+  expect(formatTokenUsage({ totalTokens: 2_400, contextWindow: 1_000 })).toBe("2.4K (100%)");
+    expect(formatTokenUsage({ totalTokens: 0 })).toBe("");
+    expect(formatTokenUsage(undefined)).toBe("");
+    expect(formatTokenUsage({ totalTokens: 1_500_000, costUsd: 12.345 })).toBe("1.5M · $12.35");
+  });
+
+  test("routes prompts by session status without converting", () => {
+    expect(promptModeForSession(session({ status: "active" }))).toBe("steer");
+    expect(promptModeForSession(session({ status: "idle" }))).toBe("prompt");
+    expect(
+      promptModeForSession(session({ status: "completed", threadId: "t", cwd: "/w" })),
+    ).toBe("continue");
+    expect(promptModeForSession(session({ status: "completed", threadId: undefined }))).toBeUndefined();
+    expect(promptModeForSession(session({ status: "starting" }))).toBeUndefined();
+  expect(promptModeForSession(session({ status: "stale", threadId: "t", cwd: "/w" }))).toBeUndefined();
+    expect(promptModeForSession(undefined)).toBeUndefined();
+  });
+
+  test("distinguishes the idle glyph and ranks idle sessions live", () => {
+    expect(statusGlyph("idle")).toBe("◌");
+    const shown = visibleSessions([session({ status: "idle" })], false, [], 0);
+    expect(shown).toHaveLength(1);
+  });
+
+  test("builds picker options with a disabled opencode slot", () => {
+    const options = modelPickerOptions(FALLBACK_MODELS);
+    expect(options[0].value).toBe("codex/gpt-5.6-sol");
+    expect(options[0].name).toContain("*");
+    const opencode = options.find((option) => option.model.provider === "opencode");
+    expect(opencode?.disabled).toBe(true);
+    expect(opencode?.name).toContain("coming soon");
+  });
+
+  test("falls back to the embedded catalog on bad JSON", () => {
+    expect(parseModelCatalog("not json")).toBe(FALLBACK_MODELS);
+    expect(parseModelCatalog("[]")).toBe(FALLBACK_MODELS);
+    const parsed = parseModelCatalog(
+      JSON.stringify([{ provider: "codex", id: "gpt-x", available: true }]),
+    );
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].id).toBe("gpt-x");
+  });
+
+  test("new session arguments always run idle", () => {
+    const args = newSessionRunArguments({
+      provider: "claude",
+      model: "claude-fable-5",
+      cwd: "/work/app",
+      promptFile: "/tmp/p.md",
+      stateDirectory: "/tmp/run",
+    });
+    expect(args).toContain("--idle");
+    expect(args.slice(0, 3)).toEqual(["run", "--provider", "claude"]);
+    expect(args).toContain("claude-fable-5");
+    const resumed = newSessionRunArguments({
+      provider: "codex",
+      cwd: "/w",
+      promptFile: "/p",
+      stateDirectory: "/s",
+      resumeThreadId: "session-9",
+    });
+    expect(resumed).toContain("--resume-thread");
+    expect(resumed).toContain("session-9");
+  });
+
+  test("continuations now run idle and accept model overrides", () => {
+    const args = continuationRunArguments(
+      session({ threadId: "t-1", cwd: "/w", model: "gpt-test" }),
+      "/tmp/p.md",
+      "/tmp/run",
+      { model: "gpt-5.6-terra" },
+    );
+    expect(args).toContain("--idle");
+    expect(args).toContain("gpt-5.6-terra");
+    expect(args).not.toContain("gpt-test");
+  });
+
+  test("parses deja hits into resumable sessions", () => {
+    const json = JSON.stringify({
+      hits: [
+        { resume: "codex resume abc-123", project: "app", date: "2026-08-29", openingPrompt: "fix the bug" },
+        { resume: "claude --resume def-456", project: "web", date: "2026-08-28", openingPrompt: "add tests" },
+        { project: "no-resume" },
+        { resume: "pi something else" },
+      ],
+    });
+    const hits = parseDejaHits(json);
+    expect(hits).toHaveLength(2);
+    expect(hits[0]).toMatchObject({ provider: "codex", sessionId: "abc-123", project: "app" });
+    expect(hits[1]).toMatchObject({ provider: "claude", sessionId: "def-456" });
+    expect(parseDejaHits("broken")).toEqual([]);
+  });
+
+  test("builds a chat transcript from events.jsonl", () => {
+    const lines = [
+      { method: "item/completed", params: { threadId: "root", item: { type: "userMessage", origin: "rudder", text: "do the thing" } } },
+      { method: "item/started", params: { threadId: "root", item: { id: "cmd-1", type: "commandExecution", command: "bun test" } } },
+      { method: "item/completed", params: { threadId: "root", item: { id: "cmd-1", type: "commandExecution", command: "bun test", exitCode: 0 } } },
+      { method: "item/completed", params: { threadId: "sub", item: { id: "sub-1", type: "commandExecution", command: "hidden" } } },
+      { method: "item/completed", params: { threadId: "root", item: { type: "agentMessage", text: "done" } } },
+      { method: "item/completed", params: { threadId: "root", item: { type: "userMessage", origin: "rudder", text: "now this" } } },
+    ]
+      .map((line) => JSON.stringify(line))
+      .join("\n");
+    const entries = parseChatTranscript(lines);
+    expect(entries.map((entry) => entry.kind)).toEqual(["user", "tool", "agent", "user"]);
+    expect(entries[1]).toMatchObject({ text: "bun test", status: "completed" });
+    expect(entries.some((entry) => entry.text === "hidden")).toBe(false);
+  });
+
+  test("filters old transcripts by the selected root thread", () => {
+  const lines = [
+    { method: "item/completed", params: { threadId: "sub", item: { type: "agentMessage", text: "hidden" } } },
+    { method: "item/completed", params: { threadId: "root", item: { type: "agentMessage", text: "visible" } } },
+  ]
+    .map((line) => JSON.stringify(line))
+    .join("\n");
+  expect(parseChatTranscript(lines, "root").map((entry) => entry.text)).toEqual(["visible"]);
   });
 });

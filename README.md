@@ -185,6 +185,38 @@ For exact multiline input:
   --message-file .scratch/rudder-demo/steer.md
 ```
 
+## Idle sessions: multi-turn without new processes
+
+`rudder run --idle` keeps the controller and provider alive after a turn
+finishes. The run's status becomes `idle` and the control socket accepts new
+turns on the same thread:
+
+```bash
+./rudder run --idle --prompt-file task.md --state-dir .scratch/demo/run &
+./rudder wait  --state-dir .scratch/demo/run   # blocks through idle; Ctrl+C to stop watching
+./rudder prompt --state-dir .scratch/demo/run "Now add tests for the fix."
+./rudder stop   --state-dir .scratch/demo/run  # graceful shutdown while idle
+```
+
+Rules:
+
+- `prompt` works only while the session is idle; `steer` works only while a
+  turn is active. Neither command is ever converted into the other.
+- `interrupt` during a turn returns an idle session to `idle` instead of
+  killing the provider; `stop` ends an idle session gracefully.
+- `--idle-timeout` (default 4h) exits the session after that long idle; the
+  final persisted status is the last turn's terminal status.
+- `--turn-timeout` applies per turn.
+- `output.md` separates turns with `---`; each prompt is also recorded as a
+  synthetic `userMessage` item in `events.jsonl` (private artifact) so the TUI
+  can render a conversation.
+- state.json gains `idle`, `turns`, and `tokenUsage` (cumulative counts,
+  context window, and cost when the provider reports one). Prompt text still
+  never reaches state.json.
+
+`rudder models [--json]` prints the model catalog (providers, models, default
+per provider) that the TUI's picker uses.
+
 ## Observe and control
 
 ```bash
@@ -217,8 +249,24 @@ arguments:
 ./rudder tui --theme tokyonight
 ```
 
-Live and recent runs are visibly grouped; `/` filters them by project, thread,
-status, or model. Activity and Output are clickable tabs. Both panes support
+The TUI is prompt-first: the default view is one session's conversation (the
+Chat tab, built from the run's `events.jsonl`) with a persistent input box at
+the bottom. Typing into it routes by session status — an active turn gets
+steered, an idle `--idle` session gets a new turn over the control socket, and
+a finished session continues its thread in a fresh run. The footer's right
+side shows the selected session's model, token usage, and cost, e.g.
+`gpt-5.6-sol · 186.1K (24%) · idle`.
+
+`n` starts a brand-new session: pick a provider/model in the T3-style picker
+(opencode appears greyed out until its adapter exists), type the first prompt,
+and the TUI spawns a detached `rudder run --idle` in the current directory.
+`m` opens the same picker to override the model for continuations. When the
+`deja` CLI is installed, `f` searches past Claude/Codex transcripts and resumes
+a chosen session under rudder.
+
+The session list lives behind `Tab` as an overlay; `Enter` or `Esc` closes it.
+Within it, `/` filters by project, thread, status, or model. Chat, Activity,
+and Output are clickable tabs (`o` cycles). Both panes support
 mouse-wheel scrolling, `/` search with `n`/`N` match navigation, and `c` to copy
 the selected row. In Activity, clicking selects a row and clicking a tool row
 expands it; use the Output tab for normal mouse text selection. Enter also
@@ -233,10 +281,12 @@ previous palette. Rudder includes the 33 built-in OpenCode themes (using their
 dark variants) alongside its original theme. `--theme NAME` or
 `RUDDER_TUI_THEME=NAME` overrides the saved choice for one launch.
 
-For an active run, `s` steers and `x x` interrupts. For a finished run, `R`
-opens a prompt and continues the same provider thread/session in a fresh private
-run while preserving its working directory, model, effort, and sandbox. `r` refreshes,
-`o` switches Activity/Output, Tab changes panes, and `q` exits. State and
+For an active run, `s` focuses the prompt box to steer and `x x` interrupts
+(an idle session returns to idle; `x x` on an idle session ends it). For a
+finished run, `s` or `shift+R` continues the same provider thread/session in a
+fresh private run while preserving its working directory, model, effort, and
+sandbox. `r` refreshes, `i` toggles the session details panel, and `q` exits.
+State and
 artifacts otherwise refresh every 500ms; override that with a duration such as
 `--interval 2s`.
 

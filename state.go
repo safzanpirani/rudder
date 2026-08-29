@@ -19,29 +19,43 @@ const stateFileName = "state.json"
 const maxControlSocketPathBytes = 100
 
 type runState struct {
-	Version     int       `json:"version"`
-	Provider    string    `json:"provider"`
-	PID         int       `json:"pid"`
-	ChildPID    int       `json:"childPid,omitempty"`
-	Status      string    `json:"status"`
-	ThreadID    string    `json:"threadId,omitempty"`
-	TurnID      string    `json:"turnId,omitempty"`
-	Model       string    `json:"model"`
-	Effort      string    `json:"effort,omitempty"`
-	CWD         string    `json:"cwd"`
-	Sandbox     string    `json:"sandbox"`
-	StateDir    string    `json:"stateDir"`
-	SocketPath  string    `json:"socketPath"`
-	SocketDir   string    `json:"socketDir,omitempty"`
-	EventsPath  string    `json:"eventsPath"`
-	TracePath   string    `json:"tracePath"`
-	OutputPath  string    `json:"outputPath"`
-	StderrPath  string    `json:"stderrPath"`
-	Steers      int       `json:"steers"`
-	StartedAt   time.Time `json:"startedAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
-	CompletedAt time.Time `json:"completedAt,omitempty"`
-	Error       string    `json:"error,omitempty"`
+	Version     int         `json:"version"`
+	Provider    string      `json:"provider"`
+	PID         int         `json:"pid"`
+	ChildPID    int         `json:"childPid,omitempty"`
+	Status      string      `json:"status"`
+	ThreadID    string      `json:"threadId,omitempty"`
+	TurnID      string      `json:"turnId,omitempty"`
+	Model       string      `json:"model"`
+	Effort      string      `json:"effort,omitempty"`
+	CWD         string      `json:"cwd"`
+	Sandbox     string      `json:"sandbox"`
+	StateDir    string      `json:"stateDir"`
+	SocketPath  string      `json:"socketPath"`
+	SocketDir   string      `json:"socketDir,omitempty"`
+	EventsPath  string      `json:"eventsPath"`
+	TracePath   string      `json:"tracePath"`
+	OutputPath  string      `json:"outputPath"`
+	StderrPath  string      `json:"stderrPath"`
+	Steers      int         `json:"steers"`
+	Idle        bool        `json:"idle,omitempty"`
+	Turns       int         `json:"turns,omitempty"`
+	TokenUsage  *tokenUsage `json:"tokenUsage,omitempty"`
+	StartedAt   time.Time   `json:"startedAt"`
+	UpdatedAt   time.Time   `json:"updatedAt"`
+	CompletedAt time.Time   `json:"completedAt,omitempty"`
+	Error       string      `json:"error,omitempty"`
+}
+
+// tokenUsage carries cumulative counters only — counts and cost are
+// redaction-safe metadata for state.json.
+type tokenUsage struct {
+	InputTokens       int64   `json:"inputTokens,omitempty"`
+	CachedInputTokens int64   `json:"cachedInputTokens,omitempty"`
+	OutputTokens      int64   `json:"outputTokens,omitempty"`
+	TotalTokens       int64   `json:"totalTokens,omitempty"`
+	ContextWindow     int64   `json:"contextWindow,omitempty"`
+	CostUSD           float64 `json:"costUsd,omitempty"`
 }
 
 type stateStore struct {
@@ -89,6 +103,7 @@ func newStateStore(cfg runConfig) (*stateStore, error) {
 			Effort:     cfg.Effort,
 			CWD:        cfg.CWD,
 			Sandbox:    cfg.Sandbox,
+			Idle:       cfg.Idle,
 			StateDir:   stateDir,
 			SocketPath: socketPath,
 			SocketDir:  socketDir,

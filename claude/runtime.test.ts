@@ -15,6 +15,8 @@ class FakeSDKStream implements AsyncIterable<SDKMessage> {
   private waiters: Array<(result: IteratorResult<SDKMessage>) => void> = [];
   private closed = false;
 
+  constructor(private readonly ignoreClose = false) {}
+
   push(value: SDKMessage): void {
     const waiter = this.waiters.shift();
     if (waiter) waiter({ value, done: false });
@@ -22,6 +24,7 @@ class FakeSDKStream implements AsyncIterable<SDKMessage> {
   }
 
   close(): void {
+  if (this.ignoreClose) return;
     this.closed = true;
     for (const waiter of this.waiters.splice(0)) waiter({ value: undefined, done: true });
   }
@@ -260,6 +263,152 @@ test("result status recognizes Claude abort terminal reasons", () => {
   expect(resultStatus({ subtype: "success", is_error: false } as SDKResultMessage)).toBe("completed");
   expect(resultStatus({ subtype: "error_during_execution", terminal_reason: "aborted_tools", errors: [] } as unknown as SDKResultMessage)).toBe("interrupted");
   expect(resultStatus({ subtype: "error_during_execution", terminal_reason: "model_error", errors: ["boom"] } as unknown as SDKResultMessage)).toBe("failed");
+});
+
+describe("multi-turn sessions", () => {
+  test("second turn resumes the session and usage accumulates across turns", async () => {
+    const emitted: ProtocolMessage[] = [];
+    const streams: FakeSDKStream[] = [];
+    const capturedOptions: Array<Record<string, unknown>> = [];
+    const adapter = new ClaudeRudderAdapter(
+      (message) => {
+        emitted.push(message);
+      },
+      (input) => {
+        capturedOptions.push(input.options as unknown as Record<string, unknown>);
+        const stream = new FakeSDKStream();
+        streams.push(stream);
+        return stream.query();
+      },
+    );
+    await adapter.handle({ id: 1, method: "initialize", params: {} });
+    await adapter.handle({ id: 2, method: "thread/start", params: { cwd: "/tmp", sandbox: "workspace-write" } });
+    const threadID = responseResult(emitted, 2, "thread.id");
+
+    const finishTurn = async (id: number, cost: number) => {
+      await adapter.handle({ id, method: "turn/start", params: { threadId: threadID, input: [{ type: "text", text: `task ${id}` }] } });
+      streams[streams.length - 1]!.push(
+        sdk({ type: "result", subtype: "success", is_error: false, result: `done ${id}`, queued_turn_count: 0, session_id: threadID, uuid: `r${id}`, duration_ms: 1, duration_api_ms: 1, num_turns: 1, stop_reason: "end_turn", total_cost_usd: cost, usage: { input_tokens: 100, cache_read_input_tokens: 40, cache_creation_input_tokens: 10, output_tokens: 25 }, modelUsage: {}, permission_denials: [] }),
+      );
+      await waitFor(() => emitted.filter((message) => notification(message, "turn/completed")).length >= id - 2);
+    };
+
+    await finishTurn(3, 0.05);
+    expect(capturedOptions[0]!.sessionId).toBe(threadID);
+    expect(capturedOptions[0]!.resume).toBeUndefined();
+
+    await finishTurn(4, 0.07);
+    expect(capturedOptions[1]!.resume).toBe(threadID);
+    expect(capturedOptions[1]!.sessionId).toBeUndefined();
+
+    const usageNotifications = emitted.filter((message) => notification(message, "thread/tokenUsage/updated"));
+    expect(usageNotifications.length).toBe(2);
+    const last = usageNotifications[usageNotifications.length - 1] as { params: { threadId: string; tokenUsage: { total: Record<string, number> }; costUsd: number } };
+    expect(last.params.threadId).toBe(threadID);
+    expect(last.params.tokenUsage.total.inputTokens).toBe(300);
+    expect(last.params.tokenUsage.total.cachedInputTokens).toBe(80);
+    expect(last.params.tokenUsage.total.outputTokens).toBe(50);
+    expect(last.params.tokenUsage.total.totalTokens).toBe(350);
+    expect(last.params.costUsd).toBeCloseTo(0.12);
+    const indexOfUsage = emitted.indexOf(usageNotifications[0]!);
+    const indexOfCompleted = emitted.findIndex((message) => notification(message, "turn/completed"));
+    expect(indexOfUsage).toBeLessThan(indexOfCompleted);
+    await adapter.close();
+  });
+
+  test("ephemeral sessions refuse a second turn", async () => {
+    const emitted: ProtocolMessage[] = [];
+    const streams: FakeSDKStream[] = [];
+    const adapter = new ClaudeRudderAdapter(
+      (message) => {
+        emitted.push(message);
+      },
+      () => {
+        const stream = new FakeSDKStream();
+        streams.push(stream);
+        return stream.query();
+      },
+    );
+    await adapter.handle({ id: 1, method: "initialize", params: {} });
+    await adapter.handle({ id: 2, method: "thread/start", params: { cwd: "/tmp", sandbox: "workspace-write", persistSession: false } });
+    const threadID = responseResult(emitted, 2, "thread.id");
+    await adapter.handle({ id: 3, method: "turn/start", params: { threadId: threadID, input: [{ type: "text", text: "one" }] } });
+    streams[0]!.push(
+      sdk({ type: "result", subtype: "success", is_error: false, result: "done", queued_turn_count: 0, session_id: threadID, uuid: "r", duration_ms: 1, duration_api_ms: 1, num_turns: 1, stop_reason: "end_turn", total_cost_usd: 0, usage: {}, modelUsage: {}, permission_denials: [] }),
+    );
+    await waitFor(() => emitted.some((message) => notification(message, "turn/completed")));
+    await adapter.handle({ id: 4, method: "turn/start", params: { threadId: threadID, input: [{ type: "text", text: "two" }] } });
+    const error = emitted.find((message) => "id" in message && message.id === 4 && "error" in message) as { error?: { message: string } } | undefined;
+    expect(error?.error?.message).toContain("single turn");
+    await adapter.close();
+  });
+
+  test("refuses a new query while the previous stream is still emitting", async () => {
+  const emitted: ProtocolMessage[] = [];
+  const streams: FakeSDKStream[] = [];
+  const adapter = new ClaudeRudderAdapter(
+    (message) => {
+    emitted.push(message);
+    },
+    () => {
+    const stream = new FakeSDKStream(true);
+    streams.push(stream);
+    return stream.query();
+    },
+    5,
+  );
+  await adapter.handle({ id: 1, method: "initialize", params: {} });
+  await adapter.handle({ id: 2, method: "thread/start", params: { cwd: "/tmp", sandbox: "workspace-write" } });
+  const threadID = responseResult(emitted, 2, "thread.id");
+  await adapter.handle({ id: 3, method: "turn/start", params: { threadId: threadID, input: [{ type: "text", text: "one" }] } });
+  streams[0]!.push(
+    sdk({ type: "result", subtype: "success", is_error: false, result: "done", queued_turn_count: 0, session_id: threadID, uuid: "r1", duration_ms: 1, duration_api_ms: 1, num_turns: 1, stop_reason: "end_turn", total_cost_usd: 0, usage: {}, modelUsage: {}, permission_denials: [] }),
+  );
+  await waitFor(() => emitted.some((message) => notification(message, "turn/completed")));
+  await adapter.handle({ id: 4, method: "turn/start", params: { threadId: threadID, input: [{ type: "text", text: "two" }] } });
+  const response = emitted.find((message) => "id" in message && message.id === 4);
+  expect(response && "error" in response ? response.error?.message : "").toContain("did not settle");
+  expect(streams).toHaveLength(1);
+  streams[0]!.push(
+    sdk({ type: "result", subtype: "success", is_error: false, result: "late", queued_turn_count: 0, session_id: threadID, uuid: "late", duration_ms: 1, duration_api_ms: 1, num_turns: 1, stop_reason: "end_turn", total_cost_usd: 0, usage: {}, modelUsage: {}, permission_denials: [] }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(emitted.filter((message) => notification(message, "turn/completed"))).toHaveLength(1);
+  await adapter.close();
+  });
+
+  test("uses cumulative modelUsage once for queued and error results", async () => {
+  const emitted: ProtocolMessage[] = [];
+  const stream = new FakeSDKStream();
+  const adapter = new ClaudeRudderAdapter(
+    (message) => {
+    emitted.push(message);
+    },
+    () => stream.query(),
+  );
+  await adapter.handle({ id: 1, method: "initialize", params: {} });
+  await adapter.handle({ id: 2, method: "thread/start", params: { cwd: "/tmp", sandbox: "workspace-write" } });
+  const threadID = responseResult(emitted, 2, "thread.id");
+  await adapter.handle({ id: 3, method: "turn/start", params: { threadId: threadID, input: [{ type: "text", text: "one" }] } });
+  const modelUsage = {
+    "claude-main": { inputTokens: 10, cacheCreationInputTokens: 2, cacheReadInputTokens: 3, outputTokens: 4, webSearchRequests: 0, costUSD: 0.01, contextWindow: 200_000, maxOutputTokens: 8_000 },
+    "claude-subagent": { inputTokens: 20, cacheCreationInputTokens: 5, cacheReadInputTokens: 7, outputTokens: 6, webSearchRequests: 0, costUSD: 0.02, contextWindow: 100_000, maxOutputTokens: 8_000 },
+  };
+  stream.push(
+    sdk({ type: "result", subtype: "success", is_error: false, result: "queued", queued_turn_count: 1, session_id: threadID, uuid: "queued", duration_ms: 1, duration_api_ms: 1, num_turns: 1, stop_reason: "end_turn", total_cost_usd: 0.01, usage: { input_tokens: 999, output_tokens: 999 }, modelUsage: { "claude-main": modelUsage["claude-main"] }, permission_denials: [] }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(emitted.filter((message) => notification(message, "thread/tokenUsage/updated"))).toHaveLength(0);
+  stream.push(
+    sdk({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["model error"], terminal_reason: "model_error", queued_turn_count: 0, session_id: threadID, uuid: "final", duration_ms: 2, duration_api_ms: 2, num_turns: 2, stop_reason: null, total_cost_usd: 0.03, usage: { input_tokens: 999, output_tokens: 999 }, modelUsage, permission_denials: [] }),
+  );
+  await waitFor(() => emitted.some((message) => notification(message, "turn/completed")));
+  const usage = emitted.find((message) => notification(message, "thread/tokenUsage/updated")) as { params: { tokenUsage: { total: Record<string, number>; modelContextWindow: number }; costUsd: number } };
+  expect(usage.params.tokenUsage.total).toEqual({ inputTokens: 47, cachedInputTokens: 10, outputTokens: 10, totalTokens: 57 });
+  expect(usage.params.tokenUsage.modelContextWindow).toBe(200_000);
+  expect(usage.params.costUsd).toBeCloseTo(0.03);
+  await adapter.close();
+  });
 });
 
 function sdk(value: unknown): SDKMessage {

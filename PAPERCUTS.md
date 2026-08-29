@@ -64,3 +64,18 @@ While installing the global Rudder binary, macOS killed a final cmp -s verificat
 
 The tmux SKILL.md helper example uses positional arguments for wait-for-text.sh, but the installed script requires -t and -p named flags. Update the example to match the helper's current CLI.
 
+## 8656cb · 2026-08-27T19:49:15.671Z — codex — gpt-5.6-sol
+
+- **Directory:** `/Users/safzan/Development/projects/codex-rudder`
+- **About:** `skill-creator`
+- **Tags:** `tooling`
+
+The bundled quick_validate.py script is not executable, so the documented direct invocation fails with permission denied. Running it through python3 works; either add its executable bit or document python3 explicitly.
+
+## 8a77fc · 2026-08-29T09:27:25.706Z — codex — gpt-5.6-sol
+
+- **Directory:** `/Users/safzan/Development/projects/codex-rudder`
+- **Tags:** `test-gap`
+
+While restarting the TUI after a PTY verification, pressing q during an in-flight refresh destroyed the renderer before refresh finished. refresh then called setStatus on a destroyed TextBuffer and crashed; shutdown should await or cancel refresh work before renderer destruction.
+

@@ -20,10 +20,22 @@ export interface RunState {
   tracePath?: string;
   outputPath?: string;
   steers?: number;
+  idle?: boolean;
+  turns?: number;
+  tokenUsage?: TokenUsage;
   startedAt?: string;
   updatedAt?: string;
   completedAt?: string;
   error?: string;
+}
+
+export interface TokenUsage {
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  contextWindow?: number;
+  costUsd?: number;
 }
 
 export interface Session extends RunState {
@@ -55,6 +67,10 @@ export interface ToolEventDetail {
   query?: string;
   toolName?: string;
   input?: Record<string, unknown>;
+  agentThreadId?: string;
+  agentPath?: string;
+  activityKind?: string;
+  timestampMs?: number;
 }
 
 export interface DiscoverOptions {
@@ -64,10 +80,14 @@ export interface DiscoverOptions {
   processAlive?: (pid: number) => boolean;
 }
 
-export type Artifact = "trace" | "output";
+export type Artifact = "chat" | "trace" | "output";
 
 export function artifactAllowsTextSelection(artifact: Artifact): boolean {
   return artifact === "output";
+}
+
+export function nextArtifact(artifact: Artifact): Artifact {
+  return artifact === "chat" ? "trace" : artifact === "trace" ? "output" : "chat";
 }
 export type Focus = "sessions" | "artifact" | "steer";
 
@@ -89,10 +109,31 @@ export type ViewEvent =
   | { type: "clear-interrupt" };
 
 export const initialViewState: ViewState = {
-  artifact: "trace",
+  artifact: "chat",
   focus: "sessions",
   interruptArmedUntil: 0,
 };
+
+export class AsyncTaskGate {
+  private active?: Promise<void>;
+  private stopping = false;
+
+  run(task: () => Promise<void>): Promise<void> {
+    if (this.stopping || this.active) return Promise.resolve();
+    const active = Promise.resolve()
+      .then(task)
+      .finally(() => {
+        if (this.active === active) this.active = undefined;
+      });
+    this.active = active;
+    return active;
+  }
+
+  async stop(): Promise<void> {
+    this.stopping = true;
+    await this.active;
+  }
+}
 
 export function reduceView(state: ViewState, event: ViewEvent): ViewState {
   switch (event.type) {
@@ -114,10 +155,7 @@ export function reduceView(state: ViewState, event: ViewEvent): ViewState {
         interruptArmedUntil: 0,
       };
     case "toggle-artifact":
-      return {
-        ...state,
-        artifact: state.artifact === "trace" ? "output" : "trace",
-      };
+      return { ...state, artifact: nextArtifact(state.artifact) };
     case "toggle-focus":
       return {
         ...state,
@@ -259,11 +297,13 @@ function compareSessions(left: Session, right: Session): number {
   const rank = (status: string) =>
     status === "active"
       ? 0
-      : status === "starting"
+      : status === "idle"
         ? 1
-        : status === "stale"
-          ? 3
-          : 2;
+        : status === "starting"
+          ? 2
+          : status === "stale"
+            ? 4
+            : 3;
   const byRank = rank(left.status) - rank(right.status);
   if (byRank !== 0) return byRank;
   return Date.parse(right.updatedAt ?? "") - Date.parse(left.updatedAt ?? "");
@@ -386,7 +426,10 @@ export function visibleSessions(
   const explicit = new Set(explicitStateDirs);
   let historyCount = 0;
   return sessions.filter((session) => {
-    const live = session.status === "active" || session.status === "starting";
+    const live =
+      session.status === "active" ||
+      session.status === "idle" ||
+      session.status === "starting";
     if (live || explicit.has(session.stateDir)) return true;
     if (historyCount >= historyLimit) return false;
     historyCount++;
@@ -421,14 +464,23 @@ export function latestAgentUpdate(content: string): string | undefined {
 export function parseToolEventDetails(content: string): ToolEventDetail[] {
   const byID = new Map<string, ToolEventDetail>();
   const order: string[] = [];
+  const messagesByThread = new Map<string, string>();
+  const turnsByThread = new Map<
+    string,
+    { status?: string; durationMs?: number }
+  >();
   for (const line of content.split("\n")) {
     try {
       const event = JSON.parse(line) as {
         method?: string;
+        emittedAtMs?: number;
         params?: {
+          threadId?: string;
+          turn?: { status?: string; durationMs?: number };
           item?: {
             id?: string;
             type?: string;
+            text?: string;
             command?: string;
             cwd?: string;
             status?: string;
@@ -438,17 +490,31 @@ export function parseToolEventDetails(content: string): ToolEventDetail[] {
             query?: string;
             toolName?: string;
             input?: Record<string, unknown>;
+            agentThreadId?: string;
+            agentPath?: string;
+            kind?: string;
           };
         };
       };
       const item = event.params?.item;
+      const threadId = event.params?.threadId;
+      if (
+        event.method === "item/completed" &&
+        item?.type === "agentMessage" &&
+        item.text &&
+        threadId
+      )
+        messagesByThread.set(threadId, item.text);
+      if (event.method === "turn/completed" && threadId)
+        turnsByThread.set(threadId, event.params?.turn ?? {});
       if (!item?.id || !item.type || !event.method?.startsWith("item/"))
         continue;
       if (
         item.type !== "commandExecution" &&
         item.type !== "webSearch" &&
         item.type !== "fileChange" &&
-        item.type !== "toolCall"
+        item.type !== "toolCall" &&
+        item.type !== "subAgentActivity"
       )
         continue;
       const previous = byID.get(item.id);
@@ -466,24 +532,204 @@ export function parseToolEventDetails(content: string): ToolEventDetail[] {
         ...previous,
         id: item.id,
         type: item.type,
-        command: item.command ?? previous?.command,
+        command:
+          item.command ??
+          (item.type === "subAgentActivity" ? item.agentPath : undefined) ??
+          previous?.command,
         cwd: item.cwd ?? previous?.cwd,
         status: eventStatus,
         output: item.aggregatedOutput ?? previous?.output,
         exitCode: item.exitCode ?? previous?.exitCode,
         durationMs: item.durationMs ?? previous?.durationMs,
         query: item.query ?? previous?.query,
-        toolName: item.toolName ?? previous?.toolName,
+        toolName:
+          item.toolName ??
+          (item.type === "subAgentActivity" ? "subAgentActivity" : undefined) ??
+          previous?.toolName,
         input: item.input ?? previous?.input,
+        agentThreadId: item.agentThreadId ?? previous?.agentThreadId,
+        agentPath: item.agentPath ?? previous?.agentPath,
+        activityKind: item.kind ?? previous?.activityKind,
+        timestampMs: event.emittedAtMs ?? previous?.timestampMs,
       });
     } catch {
       // A bounded tail may begin in the middle of a JSONL record.
     }
   }
+  for (const detail of byID.values()) {
+    if (detail.type !== "subAgentActivity" || !detail.agentThreadId) continue;
+    detail.output = messagesByThread.get(detail.agentThreadId) ?? detail.output;
+    const turn = turnsByThread.get(detail.agentThreadId);
+    detail.durationMs = turn?.durationMs ?? detail.durationMs;
+    if (turn?.status)
+      detail.status = turn.status === "completed" ? "completed" : "failed";
+  }
   return order.flatMap((id) => {
     const detail = byID.get(id);
     return detail ? [detail] : [];
   });
+}
+
+export function attachToolDetails(
+  activities: TraceActivity[],
+  details: ToolEventDetail[],
+): Array<ToolEventDetail | undefined> {
+  const used = new Set<string>();
+  return activities.map((activity) => {
+    if (activity.kind !== "tool") return undefined;
+    const summary = activity.text.replace(/…$/, "").toLocaleLowerCase();
+    const candidates = details.filter((detail) => {
+      if (used.has(detail.id)) return false;
+      const text =
+        `${detail.command || ""} ${detail.query || ""} ${detail.toolName || ""}`.toLocaleLowerCase();
+      if (summary && (text.includes(summary) || summary.includes(text.trim())))
+        return true;
+      if (activity.label === "files") return detail.type === "fileChange";
+      if (activity.label?.toLocaleLowerCase().includes("websearch"))
+        return detail.type === "webSearch";
+      if (activity.label?.toLocaleLowerCase() === "subagentactivity")
+        return detail.type === "subAgentActivity";
+      return activity.label === "shell" && detail.type === "commandExecution";
+    });
+    let match = candidates[0];
+    if (activity.label?.toLocaleLowerCase() === "subagentactivity") {
+      const activityTime = Date.parse(activity.timestamp);
+      match = candidates
+        .filter(
+          (detail) =>
+            Number.isFinite(activityTime) &&
+            detail.timestampMs !== undefined &&
+            Math.abs(detail.timestampMs - activityTime) < 2_000,
+        )
+        .sort(
+          (left, right) =>
+            Math.abs(left.timestampMs! - activityTime) -
+            Math.abs(right.timestampMs! - activityTime),
+        )[0];
+    }
+    if (match) used.add(match.id);
+    return match;
+  });
+}
+
+export type ChatEntryKind = "user" | "agent" | "tool" | "thought";
+
+export interface ChatEntry {
+  kind: ChatEntryKind;
+  text: string;
+  status?: ToolActivityStatus;
+  itemId?: string;
+}
+
+// Builds a conversation transcript from events.jsonl: the user's prompts
+// (synthetic userMessage items written by the controller), agent messages,
+// and compact one-line tool entries.
+export function parseChatTranscript(
+  content: string,
+  rootThreadId?: string,
+): ChatEntry[] {
+  const entries: ChatEntry[] = [];
+  const toolIndexById = new Map<string, number>();
+  const rootThreads = new Set<string>(rootThreadId ? [rootThreadId] : []);
+  for (const line of content.split("\n")) {
+    try {
+      const event = JSON.parse(line) as {
+        method?: string;
+        params?: {
+          threadId?: string;
+          item?: {
+            id?: string;
+            type?: string;
+            text?: string;
+            command?: string;
+            status?: string;
+            summary?: unknown;
+            toolName?: string;
+            query?: string;
+            exitCode?: number;
+            origin?: string;
+          };
+        };
+      };
+      const item = event.params?.item;
+      const threadId = event.params?.threadId;
+      if (item?.type === "userMessage" && item.origin === "rudder" && threadId)
+        rootThreads.add(threadId);
+      if (!item?.type || !event.method?.startsWith("item/")) continue;
+      // Sub-agent items carry a different threadId; keep the root conversation.
+      if (threadId && rootThreads.size > 0 && !rootThreads.has(threadId))
+        continue;
+      if (item.type === "userMessage") {
+        if (event.method === "item/completed" && item.text)
+          entries.push({ kind: "user", text: item.text });
+        continue;
+      }
+      if (item.type === "agentMessage") {
+        if (event.method === "item/completed" && item.text)
+          entries.push({ kind: "agent", text: item.text });
+        continue;
+      }
+      if (item.type === "reasoning") {
+        if (event.method === "item/completed") {
+          const text = cleanThought(flattenSummary(item.summary));
+          if (text) entries.push({ kind: "thought", text });
+        }
+        continue;
+      }
+      if (
+        item.type === "commandExecution" ||
+        item.type === "fileChange" ||
+        item.type === "webSearch" ||
+        item.type === "toolCall" ||
+        item.type === "subAgentActivity"
+      ) {
+        if (!item.id) continue;
+        const label =
+          item.command ||
+          item.query ||
+          item.toolName ||
+          (item.type === "fileChange" ? "file changes" : item.type);
+        const status: ToolActivityStatus =
+          event.method === "item/started"
+            ? "running"
+            : item.status === "failed" ||
+                (item.exitCode !== undefined && item.exitCode !== 0)
+              ? "failed"
+              : event.method === "item/completed"
+                ? "completed"
+                : "running";
+        const existing = toolIndexById.get(item.id);
+        const entry: ChatEntry = {
+          kind: "tool",
+          text: label,
+          status,
+          itemId: item.id,
+        };
+        if (existing !== undefined) entries[existing] = entry;
+        else {
+          toolIndexById.set(item.id, entries.length);
+          entries.push(entry);
+        }
+      }
+    } catch {
+      // A bounded tail may begin in the middle of a JSONL record.
+    }
+  }
+  return entries;
+}
+
+function flattenSummary(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value))
+    return value
+      .map((part) => flattenSummary(part))
+      .filter(Boolean)
+      .join(" ");
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return flattenSummary(record.text ?? record.content ?? "");
+  }
+  return "";
 }
 
 export function filterSessions(sessions: Session[], query: string): Session[] {
@@ -546,6 +792,7 @@ export function compactSessionDetails(session: Session | undefined): string {
     `provider ${session.provider ?? "codex"}`,
     `model    ${session.model || "—"}${session.effort ? ` / ${session.effort}` : ""}`,
     `cwd      ${session.cwd || "—"}`,
+    session.tokenUsage ? `tokens   ${formatTokenUsage(session.tokenUsage)}` : "",
     session.error ? `error    ${session.error}` : "",
   ]
     .filter(Boolean)
@@ -556,13 +803,14 @@ export function continuationRunArguments(
   session: Session,
   promptFile: string,
   stateDirectory: string,
+  overrides: { model?: string; effort?: string; provider?: string } = {},
 ): string[] {
   if (!session.threadId || !session.cwd)
     throw new Error("continuation requires a thread and working directory");
   const args = [
     "run",
     "--provider",
-    session.provider ?? "codex",
+    overrides.provider ?? session.provider ?? "codex",
     "--cwd",
     session.cwd,
     "--resume-thread",
@@ -575,10 +823,199 @@ export function continuationRunArguments(
     session.sandbox || "workspace-write",
     "--approval-policy",
     "never",
+    "--idle",
   ];
-  if (session.model) args.push("--model", session.model);
-  if (session.effort) args.push("--effort", session.effort);
+  const model = overrides.model ?? session.model;
+  const effort = overrides.effort ?? session.effort;
+  if (model) args.push("--model", model);
+  if (effort) args.push("--effort", effort);
   return args;
+}
+
+export function formatTokenCount(value: number): string {
+  if (value >= 1_000_000)
+    return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return `${value}`;
+}
+
+// "186.1K (18%) · $0.10" — percent only with a known context window, cost
+// only when the provider reports one.
+export function formatTokenUsage(usage: TokenUsage | undefined): string {
+  if (!usage) return "";
+  const total = usage.totalTokens ?? 0;
+  const parts: string[] = [];
+  if (total > 0) {
+    let tokens = formatTokenCount(total);
+    if (usage.contextWindow && usage.contextWindow > 0) {
+      const percent = Math.min(
+        100,
+        Math.round((total / usage.contextWindow) * 100),
+      );
+      tokens += ` (${percent}%)`;
+    }
+    parts.push(tokens);
+  }
+  if (usage.costUsd && usage.costUsd > 0)
+    parts.push(`$${usage.costUsd.toFixed(2)}`);
+  return parts.join(" · ");
+}
+
+export type PromptRoute = "steer" | "prompt" | "continue";
+
+// Routes a typed prompt: active turns get steered, idle sessions get a new
+// turn over the control socket, finished threads get a continuation run.
+// Never converts one route into another.
+export function promptModeForSession(
+  session: Session | undefined,
+): PromptRoute | undefined {
+  if (!session) return undefined;
+  if (session.status === "active") return "steer";
+  if (session.status === "idle") return "prompt";
+  if (
+    (session.status === "completed" ||
+      session.status === "failed" ||
+      session.status === "interrupted") &&
+    session.threadId &&
+    session.cwd
+  )
+    return "continue";
+  return undefined;
+}
+
+export interface ModelInfo {
+  provider: string;
+  id?: string;
+  label?: string;
+  efforts?: string[];
+  contextWindow?: number;
+  default?: boolean;
+  available: boolean;
+  note?: string;
+}
+
+// Embedded fallback for older rudder binaries without `rudder models`.
+export const FALLBACK_MODELS: ModelInfo[] = [
+  { provider: "codex", id: "gpt-5.6-sol", label: "GPT-5.6-Sol", default: true, available: true },
+  { provider: "codex", id: "gpt-5.6-terra", label: "GPT-5.6-Terra", available: true },
+  { provider: "codex", id: "gpt-5.6-luna", label: "GPT-5.6-Luna", available: true },
+  { provider: "claude", id: "claude-fable-5", label: "Claude Fable 5", available: true },
+  { provider: "claude", id: "claude-opus-5", label: "Claude Opus 5", default: true, available: true },
+  { provider: "claude", id: "claude-sonnet-5", label: "Claude Sonnet 5", available: true },
+  { provider: "claude", id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5", available: true },
+  { provider: "opencode", available: false, note: "coming soon" },
+];
+
+export interface ModelPickerOption {
+  name: string;
+  description: string;
+  value: string;
+  disabled: boolean;
+  model: ModelInfo;
+}
+
+export function modelPickerOptions(models: ModelInfo[]): ModelPickerOption[] {
+  return models.map((model) => ({
+    name: model.available
+      ? `${model.label || model.id}${model.default ? " *" : ""}`
+      : `${model.provider} (${model.note || "unavailable"})`,
+    description: model.available
+      ? model.provider
+      : model.note || "unavailable",
+    value: model.available ? `${model.provider}/${model.id}` : model.provider,
+    disabled: !model.available,
+    model,
+  }));
+}
+
+export function parseModelCatalog(json: string): ModelInfo[] {
+  try {
+    const parsed = JSON.parse(json) as ModelInfo[];
+    if (!Array.isArray(parsed)) return FALLBACK_MODELS;
+    const valid = parsed.filter(
+      (model) =>
+        model &&
+        typeof model.provider === "string" &&
+        (model.available === false || typeof model.id === "string"),
+    );
+    return valid.length > 0 ? valid : FALLBACK_MODELS;
+  } catch {
+    return FALLBACK_MODELS;
+  }
+}
+
+export interface NewSessionOptions {
+  provider: string;
+  model?: string;
+  effort?: string;
+  cwd: string;
+  promptFile: string;
+  stateDirectory: string;
+  resumeThreadId?: string;
+}
+
+export function newSessionRunArguments(options: NewSessionOptions): string[] {
+  const args = [
+    "run",
+    "--provider",
+    options.provider,
+    "--cwd",
+    options.cwd,
+    "--prompt-file",
+    options.promptFile,
+    "--state-dir",
+    options.stateDirectory,
+    "--sandbox",
+    "workspace-write",
+    "--approval-policy",
+    "never",
+    "--idle",
+  ];
+  if (options.resumeThreadId)
+    args.push("--resume-thread", options.resumeThreadId);
+  if (options.model) args.push("--model", options.model);
+  if (options.effort) args.push("--effort", options.effort);
+  return args;
+}
+
+export interface DejaHit {
+  provider: "codex" | "claude";
+  sessionId: string;
+  project: string;
+  date: string;
+  openingPrompt: string;
+}
+
+// deja find --json hits carry a `resume` command like "codex resume <id>" or
+// "claude --resume <id>"; the id doubles as rudder's --resume-thread value.
+export function parseDejaHits(json: string): DejaHit[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return [];
+  }
+  const hits =
+    parsed && typeof parsed === "object" && Array.isArray((parsed as { hits?: unknown[] }).hits)
+      ? ((parsed as { hits: unknown[] }).hits as Array<Record<string, unknown>>)
+      : [];
+  const results: DejaHit[] = [];
+  for (const hit of hits) {
+    const resume = typeof hit.resume === "string" ? hit.resume : "";
+    const match =
+      /^claude --resume (\S+)$/.exec(resume) ??
+      /^codex resume (\S+)$/.exec(resume);
+    if (!match) continue;
+    results.push({
+      provider: resume.startsWith("claude") ? "claude" : "codex",
+      sessionId: match[1],
+      project: typeof hit.project === "string" ? hit.project : "",
+      date: typeof hit.date === "string" ? hit.date : "",
+      openingPrompt:
+        typeof hit.openingPrompt === "string" ? hit.openingPrompt : "",
+    });
+  }
+  return results;
 }
 
 export function sessionDetails(session: Session | undefined): string {
@@ -593,7 +1030,8 @@ export function sessionDetails(session: Session | undefined): string {
     `thread   ${session.threadId || "—"}`,
     `turn     ${session.turnId || "—"}`,
     `cwd      ${session.cwd || "—"}`,
-    `runtime  ${elapsed}    pid ${session.pid}    steers ${session.steers ?? 0}`,
+    `runtime  ${elapsed}    pid ${session.pid}    steers ${session.steers ?? 0}${session.turns ? `    turns ${session.turns}` : ""}`,
+    session.tokenUsage ? `tokens   ${formatTokenUsage(session.tokenUsage)}` : "",
     session.error ? `error    ${session.error}` : "",
   ]
     .filter(Boolean)
@@ -604,6 +1042,8 @@ export function statusGlyph(status: string): string {
   switch (status) {
     case "active":
       return "●";
+    case "idle":
+      return "◌";
     case "starting":
       return "◐";
     case "completed":

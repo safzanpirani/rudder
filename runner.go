@@ -40,8 +40,16 @@ type runConfig struct {
 	ForkBeforeTurnID  string
 	ForkThroughTurnID string
 	TurnTimeout       time.Duration
+	Idle              bool
+	IdleTimeout       time.Duration
 	ChildCommand      []string
 	RegisterRun       bool
+}
+
+type promptRequest struct {
+	text          string
+	observedTurns int
+	reply         chan error
 }
 
 type rpcError struct {
@@ -58,28 +66,39 @@ type rpcEnvelope struct {
 }
 
 type controller struct {
-	cfg         runConfig
-	store       *stateStore
-	child       *exec.Cmd
-	childIn     io.WriteCloser
-	listener    net.Listener
-	events      *os.File
-	trace       *os.File
-	stderr      *os.File
-	writeMu     sync.Mutex
-	traceMu     sync.Mutex
-	outputMu    sync.Mutex
-	outputParts []string
-	resultMu    sync.Mutex
-	resultError string
-	pendingMu   sync.Mutex
-	pending     map[string]chan rpcEnvelope
-	nextID      atomic.Uint64
-	done        chan struct{}
-	doneOnce    sync.Once
-	waitCh      chan error
-	readDone    chan struct{}
-	stopChild   atomic.Bool
+	cfg          runConfig
+	store        *stateStore
+	child        *exec.Cmd
+	childIn      io.WriteCloser
+	listener     net.Listener
+	events       *os.File
+	trace        *os.File
+	stderr       *os.File
+	writeMu      sync.Mutex
+	eventsMu     sync.Mutex
+	traceMu      sync.Mutex
+	outputMu     sync.Mutex
+	outputParts  []string
+	resultMu     sync.Mutex
+	resultError  string
+	pendingMu    sync.Mutex
+	pending      map[string]chan rpcEnvelope
+	nextID       atomic.Uint64
+	turnMu       sync.Mutex
+	turnDone     chan struct{}
+	turnEnded    bool
+	turnCount    int
+	lastTurn     string
+	sessionEnded bool
+	sessionDone  chan struct{}
+	sessionOnce  sync.Once
+	cancelOnce   sync.Once
+	promptCh     chan promptRequest
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
+	waitCh       chan error
+	readDone     chan struct{}
+	stopChild    atomic.Bool
 }
 
 func runController(cfg runConfig) error {
@@ -102,12 +121,15 @@ func runControllerContext(ctx context.Context, cfg runConfig) error {
 		return err
 	}
 	r := &controller{
-		cfg:      cfg,
-		store:    store,
-		pending:  make(map[string]chan rpcEnvelope),
-		done:     make(chan struct{}),
-		waitCh:   make(chan error, 1),
-		readDone: make(chan struct{}),
+		cfg:         cfg,
+		store:       store,
+		pending:     make(map[string]chan rpcEnvelope),
+		turnDone:    make(chan struct{}),
+		sessionDone: make(chan struct{}),
+		promptCh:    make(chan promptRequest),
+		shutdownCh:  make(chan struct{}),
+		waitCh:      make(chan error, 1),
+		readDone:    make(chan struct{}),
 	}
 	defer r.closeControlServer()
 	if err := r.openLogs(); err != nil {
@@ -125,10 +147,7 @@ func runControllerContext(ctx context.Context, cfg runConfig) error {
 	go func() {
 		select {
 		case <-ctx.Done():
-			r.stopChild.Store(true)
-			r.tracef("[interrupt] controller context canceled")
-			r.finish("interrupted", "")
-			terminateProcessTree(r.child, false)
+			r.cancelSession()
 		case <-cancelWatchDone:
 		}
 	}()
@@ -144,21 +163,9 @@ func runControllerContext(ctx context.Context, cfg runConfig) error {
 		r.fail(err)
 		return err
 	}
-	if cfg.TurnTimeout > 0 {
-		timer := time.NewTimer(cfg.TurnTimeout)
-		select {
-		case <-r.done:
-			if !timer.Stop() {
-				<-timer.C
-			}
-		case <-timer.C:
-			r.stopChild.Store(true)
-			r.tracef("[error] active turn exceeded watchdog %s", cfg.TurnTimeout)
-			r.finish("failed", "turn watchdog expired")
-			terminateProcessTree(r.child, false)
-		}
-	} else {
-		<-r.done
+	r.waitTurn()
+	if cfg.Idle {
+		r.idleLoop(ctx)
 	}
 	state := r.store.snapshot()
 	if state.Status == "completed" {
@@ -197,6 +204,9 @@ func validateRunConfig(cfg *runConfig) error {
 		if cfg.ForkThreadID != "" || cfg.ForkBeforeTurnID != "" || cfg.ForkThroughTurnID != "" {
 			return errors.New("Claude runs do not yet support --fork-thread or fork turn selectors; use --resume-thread")
 		}
+	}
+	if cfg.Idle && cfg.Ephemeral && cfg.Provider == providerClaude {
+		return errors.New("--idle requires a persisted Claude session; drop --ephemeral")
 	}
 	if cfg.ResumeThreadID != "" && cfg.ForkThreadID != "" {
 		return errors.New("--resume-thread and --fork-thread are mutually exclusive")
@@ -305,9 +315,41 @@ func (r *controller) initialize(prompt string) error {
 		return fmt.Errorf("persist thread id: %w", err)
 	}
 	r.tracef("[thread] %s %s", mode, threadID)
+	return r.startTurn(prompt, 60*time.Second)
+}
 
+// startTurn opens a new turn lifecycle and issues turn/start on the acquired
+// thread. Turn one reuses the channel allocated at construction; later turns
+// (idle mode) get a fresh one. The prompt text never reaches state.json or the
+// trace beyond a truncated single line.
+func (r *controller) startTurn(prompt string, timeout time.Duration) error {
+	r.turnMu.Lock()
+	r.turnCount++
+	turnNumber := r.turnCount
+	if turnNumber > 1 {
+		r.turnDone = make(chan struct{})
+		r.turnEnded = false
+	}
+	r.turnMu.Unlock()
+	if err := r.store.update(func(state *runState) {
+		state.Turns = turnNumber
+		if turnNumber > 1 {
+			state.TurnID = ""
+			state.Error = ""
+			state.CompletedAt = time.Time{}
+		}
+	}); err != nil {
+		r.abandonTurn()
+		return fmt.Errorf("persist turn count: %w", err)
+	}
+	if turnNumber > 1 {
+		r.appendOutputSeparator()
+		r.tracef("[turn] prompt #%d: %s", turnNumber, oneLine(prompt, 180))
+	}
+	r.recordUserMessageEvent(prompt)
+	state := r.store.snapshot()
 	turnParams := map[string]any{
-		"threadId": threadID,
+		"threadId": state.ThreadID,
 		"input": []map[string]any{{
 			"type": "text",
 			"text": prompt,
@@ -322,22 +364,194 @@ func (r *controller) initialize(prompt string) error {
 			Status string `json:"status"`
 		} `json:"turn"`
 	}
-	if err := r.call("turn/start", turnParams, &turnResult, 60*time.Second); err != nil {
+	if err := r.call("turn/start", turnParams, &turnResult, timeout); err != nil {
+		r.abandonTurn()
 		return fmt.Errorf("start turn: %w", err)
 	}
 	if turnResult.Turn.ID == "" {
+		r.abandonTurn()
 		return errors.New("turn/start returned no turn id")
 	}
-	if err := r.store.update(func(state *runState) {
-		state.TurnID = turnResult.Turn.ID
-		if !terminalStatus(state.Status) {
-			state.Status = "active"
+	if err := r.store.update(func(current *runState) {
+		current.TurnID = turnResult.Turn.ID
+		if !terminalStatus(current.Status) {
+			current.Status = "active"
 		}
 	}); err != nil {
+		r.abandonTurn()
 		return fmt.Errorf("persist active turn: %w", err)
 	}
-	r.tracef("[turn] active thread=%s turn=%s", threadID, turnResult.Turn.ID)
+	r.tracef("[turn] active thread=%s turn=%s", state.ThreadID, turnResult.Turn.ID)
 	return nil
+}
+
+// abandonTurn closes an open turn lifecycle without persisting a terminal
+// status; used when turn/start itself fails so the session can return to idle.
+func (r *controller) abandonTurn() {
+	r.turnMu.Lock()
+	defer r.turnMu.Unlock()
+	if r.turnEnded {
+		return
+	}
+	r.turnEnded = true
+	close(r.turnDone)
+}
+
+func (r *controller) waitTurn() {
+	r.turnMu.Lock()
+	turnDone := r.turnDone
+	r.turnMu.Unlock()
+	if r.cfg.TurnTimeout > 0 {
+		timer := time.NewTimer(r.cfg.TurnTimeout)
+		select {
+		case <-turnDone:
+			if !timer.Stop() {
+				<-timer.C
+			}
+		case <-timer.C:
+			r.stopChild.Store(true)
+			r.tracef("[error] active turn exceeded watchdog %s", r.cfg.TurnTimeout)
+			r.endSession("failed", "turn watchdog expired")
+			terminateProcessTree(r.child, false)
+		}
+	} else {
+		<-turnDone
+	}
+}
+
+// idleLoop keeps the session alive between turns, accepting prompt and
+// shutdown commands from the control socket until the session ends.
+func (r *controller) idleLoop(ctx context.Context) {
+	for {
+		select {
+		case <-r.sessionDone:
+			r.ensureTerminalExit()
+			return
+		case <-r.shutdownCh:
+			r.tracef("[shutdown] requested while idle")
+			r.persistFinalIdleExit()
+			return
+		default:
+		}
+		r.turnMu.Lock()
+		if r.sessionEnded {
+			r.turnMu.Unlock()
+			r.ensureTerminalExit()
+			return
+		}
+		err := r.store.update(func(state *runState) {
+			state.Status = "idle"
+			state.Error = ""
+			state.CompletedAt = time.Time{}
+		})
+		r.turnMu.Unlock()
+		if err != nil {
+			r.fail(fmt.Errorf("persist idle state: %w", err))
+			return
+		}
+		r.tracef("[idle] waiting for prompt")
+		var idleTimeout <-chan time.Time
+		var idleTimer *time.Timer
+		if r.cfg.IdleTimeout > 0 {
+			idleTimer = time.NewTimer(r.cfg.IdleTimeout)
+			idleTimeout = idleTimer.C
+		}
+		stopTimer := func() {
+			if idleTimer != nil && !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+		}
+		select {
+		case request := <-r.promptCh:
+			stopTimer()
+			accepted := false
+			r.turnMu.Lock()
+			err := r.store.update(func(state *runState) {
+				if !r.sessionEnded && state.Status == "idle" && state.Turns == request.observedTurns {
+					state.Status = "starting"
+					state.TurnID = ""
+					accepted = true
+				}
+			})
+			r.turnMu.Unlock()
+			if err == nil && !accepted {
+				err = errors.New("session left the observed idle turn before the prompt was accepted")
+			}
+			if err == nil {
+				err = r.startTurn(request.text, 40*time.Second)
+			}
+			request.reply <- err
+			if err != nil {
+				r.tracef("[error] prompt turn failed to start: %v", err)
+				if accepted {
+					r.turnMu.Lock()
+					updateErr := r.store.update(func(state *runState) {
+						if !r.sessionEnded && state.Status == "starting" {
+							state.Status = "idle"
+						}
+					})
+					r.turnMu.Unlock()
+					if updateErr != nil {
+						r.fail(fmt.Errorf("restore idle state: %w", updateErr))
+						return
+					}
+				}
+				continue
+			}
+			r.waitTurn()
+		case <-r.shutdownCh:
+			stopTimer()
+			r.tracef("[shutdown] requested while idle")
+			r.persistFinalIdleExit()
+			return
+		case <-idleTimeout:
+			r.tracef("[idle] timeout after %s", r.cfg.IdleTimeout)
+			r.persistFinalIdleExit()
+			return
+		case <-r.sessionDone:
+			stopTimer()
+			r.ensureTerminalExit()
+			return
+		case <-ctx.Done():
+			stopTimer()
+			r.cancelSession()
+			return
+		}
+	}
+}
+
+// ensureTerminalExit guards against exiting with a non-terminal "idle" status
+// when the session ends between turns.
+func (r *controller) ensureTerminalExit() {
+	if !terminalStatus(r.store.snapshot().Status) {
+		r.persistFinalIdleExit()
+	}
+}
+
+// persistFinalIdleExit restores the last turn's terminal status so the run
+// exits with a truthful state instead of "idle".
+func (r *controller) persistFinalIdleExit() {
+	r.turnMu.Lock()
+	if r.sessionEnded {
+		r.turnMu.Unlock()
+		return
+	}
+	r.sessionEnded = true
+	status := r.lastTurn
+	if status == "" {
+		status = "completed"
+	}
+	if err := r.store.update(func(state *runState) {
+		state.Status = status
+		state.CompletedAt = time.Now().UTC()
+	}); err != nil {
+		r.appendResultError(fmt.Sprintf("persist final state: %v", err))
+	}
+	r.turnMu.Unlock()
+	r.sessionOnce.Do(func() { close(r.sessionDone) })
 }
 
 func (r *controller) initializeSession() error {
@@ -448,9 +662,9 @@ func (r *controller) call(method string, params any, target any, timeout time.Du
 		return nil
 	case <-timer.C:
 		return fmt.Errorf("%s timed out after %s", method, timeout)
-	case <-r.done:
+	case <-r.sessionDone:
 		state := r.store.snapshot()
-		return fmt.Errorf("turn ended while waiting for %s: %s", method, state.Status)
+		return fmt.Errorf("session ended while waiting for %s: %s", method, state.Status)
 	}
 }
 
@@ -522,7 +736,7 @@ func (r *controller) readChild(reader io.Reader) {
 	scanner.Buffer(make([]byte, 64*1024), maxRPCLineBytes)
 	for scanner.Scan() {
 		raw := append([]byte(nil), scanner.Bytes()...)
-		_, _ = r.events.Write(append(raw, '\n'))
+		r.writeEventLine(append(raw, '\n'))
 		var message rpcEnvelope
 		if err := json.Unmarshal(raw, &message); err != nil {
 			r.tracef("[warn] invalid provider JSON: %v", err)
@@ -545,9 +759,12 @@ func (r *controller) readChild(reader io.Reader) {
 		r.fail(fmt.Errorf("read provider output: %w", err))
 		return
 	}
-	if !terminalStatus(r.store.snapshot().Status) {
+	if r.cfg.Idle {
+		r.endSession("failed", "provider output closed while the idle session was expected to remain available")
+	} else if !terminalStatus(r.store.snapshot().Status) {
 		r.fail(errors.New("provider output closed before turn completed"))
 	}
+	r.sessionOnce.Do(func() { close(r.sessionDone) })
 }
 
 func rpcID(raw json.RawMessage) (string, bool) {
@@ -581,11 +798,16 @@ func (r *controller) handleServerMessage(message rpcEnvelope) {
 	switch message.Method {
 	case "turn/started":
 		var params struct {
-			Turn struct {
+			ThreadID string `json:"threadId"`
+			Turn     struct {
 				ID string `json:"id"`
 			} `json:"turn"`
 		}
 		_ = json.Unmarshal(message.Params, &params)
+		if !r.isRootTurnLifecycle(params.ThreadID, params.Turn.ID) {
+			r.tracef("[turn] nested started thread=%s turn=%s", params.ThreadID, params.Turn.ID)
+			return
+		}
 		if err := r.store.update(func(state *runState) {
 			state.TurnID = params.Turn.ID
 			if !terminalStatus(state.Status) {
@@ -611,7 +833,63 @@ func (r *controller) handleServerMessage(message rpcEnvelope) {
 		_ = json.Unmarshal(message.Params, &params)
 		r.tracef("[warn] %s", params.Error.Message)
 	case "thread/tokenUsage/updated":
-		r.tracef("[usage] updated")
+		r.handleTokenUsage(message.Params)
+	}
+}
+
+func (r *controller) handleTokenUsage(raw json.RawMessage) {
+	var params struct {
+		ThreadID   string `json:"threadId"`
+		TokenUsage struct {
+			Total struct {
+				TotalTokens       int64 `json:"totalTokens"`
+				InputTokens       int64 `json:"inputTokens"`
+				CachedInputTokens int64 `json:"cachedInputTokens"`
+				OutputTokens      int64 `json:"outputTokens"`
+			} `json:"total"`
+			ModelContextWindow int64 `json:"modelContextWindow"`
+			ContextWindow      int64 `json:"contextWindow"`
+		} `json:"tokenUsage"`
+		CostUSD float64 `json:"costUsd"`
+	}
+	if err := json.Unmarshal(raw, &params); err != nil {
+		r.tracef("[warn] invalid token usage payload: %v", err)
+		return
+	}
+	state := r.store.snapshot()
+	if params.ThreadID != "" && state.ThreadID != "" && params.ThreadID != state.ThreadID {
+		return
+	}
+	total := params.TokenUsage.Total
+	contextWindow := params.TokenUsage.ModelContextWindow
+	if contextWindow == 0 {
+		contextWindow = params.TokenUsage.ContextWindow
+	}
+	if total.TotalTokens == 0 && total.InputTokens == 0 && total.OutputTokens == 0 && params.CostUSD == 0 {
+		return
+	}
+	usage := &tokenUsage{
+		InputTokens:       total.InputTokens,
+		CachedInputTokens: total.CachedInputTokens,
+		OutputTokens:      total.OutputTokens,
+		TotalTokens:       total.TotalTokens,
+		ContextWindow:     contextWindow,
+		CostUSD:           params.CostUSD,
+	}
+	if usage.CostUSD == 0 && state.TokenUsage != nil {
+		usage.CostUSD = state.TokenUsage.CostUSD
+	}
+	if usage.ContextWindow == 0 && state.TokenUsage != nil {
+		usage.ContextWindow = state.TokenUsage.ContextWindow
+	}
+	if err := r.store.update(func(current *runState) { current.TokenUsage = usage }); err != nil {
+		r.tracef("[warn] persist token usage: %v", err)
+		return
+	}
+	if usage.CostUSD > 0 {
+		r.tracef("[usage] in=%d cached=%d out=%d total=%d cost=$%.4f", usage.InputTokens, usage.CachedInputTokens, usage.OutputTokens, usage.TotalTokens, usage.CostUSD)
+	} else {
+		r.tracef("[usage] in=%d cached=%d out=%d total=%d", usage.InputTokens, usage.CachedInputTokens, usage.OutputTokens, usage.TotalTokens)
 	}
 }
 
@@ -632,13 +910,18 @@ func (r *controller) rejectServerRequest(message rpcEnvelope) {
 
 func (r *controller) handleTurnCompleted(raw json.RawMessage) {
 	var params struct {
-		Turn struct {
+		ThreadID string `json:"threadId"`
+		Turn     struct {
 			ID     string    `json:"id"`
 			Status string    `json:"status"`
 			Error  *rpcError `json:"error"`
 		} `json:"turn"`
 	}
 	_ = json.Unmarshal(raw, &params)
+	if !r.isRootTurnLifecycle(params.ThreadID, params.Turn.ID) {
+		r.tracef("[turn] nested completed thread=%s turn=%s", params.ThreadID, params.Turn.ID)
+		return
+	}
 	status := params.Turn.Status
 	if status == "inProgress" || status == "" {
 		status = "failed"
@@ -647,7 +930,18 @@ func (r *controller) handleTurnCompleted(raw json.RawMessage) {
 	if params.Turn.Error != nil {
 		errText = params.Turn.Error.Message
 	}
-	r.finish(status, errText)
+	r.finishTurn(status, errText)
+}
+
+func (r *controller) isRootTurnLifecycle(threadID, turnID string) bool {
+	state := r.store.snapshot()
+	if threadID != "" && threadID != state.ThreadID {
+		return false
+	}
+	if turnID == "" {
+		return false
+	}
+	return state.TurnID == "" || turnID == state.TurnID
 }
 
 func (r *controller) handleItem(method string, raw json.RawMessage) {
@@ -710,24 +1004,109 @@ func (r *controller) handleItem(method string, raw json.RawMessage) {
 	}
 }
 
-func (r *controller) finish(status, errText string) {
-	r.doneOnce.Do(func() {
-		if errText != "" {
-			r.appendResultError(errText)
-			r.tracef("[error] %s", oneLine(errText, 500))
-		}
-		if err := r.store.update(func(state *runState) {
-			state.Status = status
-			state.Error = redactedStateError(status, errText)
-			state.CompletedAt = time.Now().UTC()
-		}); err != nil {
-			persistErr := fmt.Sprintf("persist terminal state: %v", err)
-			r.appendResultError(persistErr)
-			r.tracef("[error] %s", oneLine(persistErr, 500))
-		}
-		r.tracef("[turn] %s", status)
-		close(r.done)
+// finishTurn ends the open turn with a terminal status. Returns false when no
+// turn was open (the terminal state was not persisted).
+func (r *controller) finishTurn(status, errText string) bool {
+	r.turnMu.Lock()
+	defer r.turnMu.Unlock()
+	if r.turnEnded || r.sessionEnded {
+		return false
+	}
+	r.turnEnded = true
+	r.lastTurn = status
+	turnDone := r.turnDone
+	r.persistTerminal(status, errText)
+	close(turnDone)
+	return true
+}
+
+// endSession ends the whole run: it terminates any open turn, persists the
+// terminal status even when the session was idle, and releases every waiter.
+func (r *controller) endSession(status, errText string) {
+	r.turnMu.Lock()
+	if r.sessionEnded {
+		r.turnMu.Unlock()
+		return
+	}
+	r.sessionEnded = true
+	turnWasOpen := !r.turnEnded
+	if turnWasOpen {
+		r.turnEnded = true
+		r.lastTurn = status
+	}
+	turnDone := r.turnDone
+	r.persistTerminal(status, errText)
+	if turnWasOpen {
+		close(turnDone)
+	}
+	r.turnMu.Unlock()
+	r.sessionOnce.Do(func() { close(r.sessionDone) })
+}
+
+func (r *controller) cancelSession() {
+	r.cancelOnce.Do(func() {
+		r.stopChild.Store(true)
+		r.tracef("[interrupt] controller context canceled")
+		r.endSession("interrupted", "")
+		terminateProcessTree(r.child, false)
 	})
+}
+
+func (r *controller) persistTerminal(status, errText string) {
+	if errText != "" {
+		r.appendResultError(errText)
+		r.tracef("[error] %s", oneLine(errText, 500))
+	}
+	if err := r.store.update(func(state *runState) {
+		state.Status = status
+		state.Error = redactedStateError(status, errText)
+		state.CompletedAt = time.Now().UTC()
+	}); err != nil {
+		persistErr := fmt.Sprintf("persist terminal state: %v", err)
+		r.appendResultError(persistErr)
+		r.tracef("[error] %s", oneLine(persistErr, 500))
+	}
+	r.tracef("[turn] %s", status)
+}
+
+func (r *controller) writeEventLine(line []byte) {
+	r.eventsMu.Lock()
+	defer r.eventsMu.Unlock()
+	if r.events == nil {
+		return
+	}
+	_, _ = r.events.Write(line)
+}
+
+// recordUserMessageEvent appends a synthetic userMessage item to events.jsonl
+// so the TUI transcript can interleave the user's prompts with agent output.
+// events.jsonl is a private 0600 artifact, so prompt text is allowed there.
+func (r *controller) recordUserMessageEvent(text string) {
+	state := r.store.snapshot()
+	raw, err := json.Marshal(map[string]any{
+		"method": "item/completed",
+		"params": map[string]any{
+			"threadId": state.ThreadID,
+			"item": map[string]any{
+				"type":   "userMessage",
+				"text":   text,
+				"origin": "rudder",
+			},
+		},
+	})
+	if err != nil {
+		return
+	}
+	r.writeEventLine(append(raw, '\n'))
+}
+
+func (r *controller) appendOutputSeparator() {
+	r.outputMu.Lock()
+	defer r.outputMu.Unlock()
+	if len(r.outputParts) == 0 {
+		return
+	}
+	r.outputParts = append(r.outputParts, "---")
 }
 
 func (r *controller) recordAgentMessage(text string) error {
@@ -766,11 +1145,13 @@ func redactedStateError(status, errText string) string {
 	}
 }
 
+// fail ends the whole session as failed; every caller treats its error as
+// fatal for the run, not just the current turn.
 func (r *controller) fail(err error) {
 	if err == nil {
 		return
 	}
-	r.finish("failed", err.Error())
+	r.endSession("failed", err.Error())
 }
 
 func (r *controller) shutdownChild() {

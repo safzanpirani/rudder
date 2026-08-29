@@ -128,11 +128,16 @@ export class ClaudeRudderAdapter {
   private runtime?: Query;
   private streamTask?: Promise<void>;
   private closed = false;
+  private turnsCompleted = 0;
+  private usageTotals = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  private costTotal = 0;
+  private contextWindow = 0;
 
   constructor(
     private readonly emit: (message: ProtocolMessage) => void | Promise<void>,
     private readonly createQuery: QueryFactory = ({ prompt, options }) =>
       query({ prompt, options }),
+    private readonly streamSettleTimeoutMs = 1_000,
   ) {}
 
   async handle(request: RPCRequest): Promise<void> {
@@ -170,7 +175,7 @@ export class ClaudeRudderAdapter {
     this.runtime?.close();
     await Promise.race([
       this.streamTask ?? Promise.resolve(),
-      new Promise<void>((resolve) => setTimeout(resolve, 1_000)),
+      new Promise<void>((resolve) => setTimeout(resolve, this.streamSettleTimeoutMs)),
     ]);
   }
 
@@ -232,6 +237,27 @@ export class ClaudeRudderAdapter {
     const text = readTextInput(input.input);
     const turnEffort = parseEffort(input.effort);
     if (turnEffort) this.thread.effort = turnEffort;
+    if (this.turnsCompleted > 0) {
+      if (!this.thread.persistSession) {
+        throw new InvalidParamsError("ephemeral Claude sessions support a single turn");
+      }
+      // Let the previous turn's stream settle before starting a fresh query.
+      this.runtime?.close();
+      const settled = await Promise.race([
+        (this.streamTask ?? Promise.resolve()).then(() => true),
+        new Promise<false>((resolve) =>
+          setTimeout(() => resolve(false), this.streamSettleTimeoutMs),
+        ),
+      ]);
+      if (!settled) {
+        throw new InvalidParamsError(
+          "the previous Claude runtime did not settle; retry the turn after it closes",
+        );
+      }
+      this.runtime = undefined;
+      this.queue = undefined;
+      this.streamTask = undefined;
+    }
     const turn: TurnState = {
       id: randomUUID(),
       textBlocks: new Map(),
@@ -430,7 +456,61 @@ export class ClaudeRudderAdapter {
     } else {
       await this.flushPendingText("commentary");
     }
+    await this.emitTokenUsage(result);
     await this.completeTurn(status, resultError(result));
+  }
+
+  // Accumulates SDK usage/cost across turns and forwards it in the same
+  // thread/tokenUsage/updated shape Codex emits, plus a costUsd extension.
+  private async emitTokenUsage(result: SDKResultMessage): Promise<void> {
+    if (!this.thread) return;
+    const count = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+    const perModel = Object.values(result.modelUsage ?? {});
+    let input = 0;
+    let cached = 0;
+    let output = 0;
+    if (perModel.length > 0) {
+      for (const usage of perModel) {
+        input +=
+          count(usage.inputTokens) +
+          count(usage.cacheCreationInputTokens) +
+          count(usage.cacheReadInputTokens);
+        cached += count(usage.cacheReadInputTokens);
+        output += count(usage.outputTokens);
+        this.contextWindow = Math.max(
+          this.contextWindow,
+          count(usage.contextWindow),
+        );
+      }
+    } else if (isRecord(result.usage)) {
+      input =
+        count(result.usage.input_tokens) +
+        count(result.usage.cache_creation_input_tokens) +
+        count(result.usage.cache_read_input_tokens);
+      cached = count(result.usage.cache_read_input_tokens);
+      output = count(result.usage.output_tokens);
+    }
+    this.usageTotals.inputTokens += input;
+    this.usageTotals.cachedInputTokens += cached;
+    this.usageTotals.outputTokens += output;
+    this.usageTotals.totalTokens += input + output;
+    if (typeof result.total_cost_usd === "number" && Number.isFinite(result.total_cost_usd)) {
+      this.costTotal += result.total_cost_usd;
+    }
+    if (this.usageTotals.totalTokens === 0 && this.costTotal === 0) return;
+    await this.emit({
+      method: "thread/tokenUsage/updated",
+      params: {
+        threadId: this.thread.id,
+        tokenUsage: {
+          total: { ...this.usageTotals },
+          ...(this.contextWindow > 0
+            ? { modelContextWindow: this.contextWindow }
+            : {}),
+        },
+        costUsd: this.costTotal,
+      },
+    });
   }
 
   private async flushPendingText(phase: "commentary" | "final_answer"): Promise<void> {
@@ -459,6 +539,12 @@ export class ClaudeRudderAdapter {
     if (!turn) return;
     this.turn = undefined;
     this.queue?.close();
+    this.turnsCompleted += 1;
+    if (this.thread?.persistSession) {
+      // The next turn must resume the persisted session instead of reusing
+      // the sessionId, which the SDK rejects for an existing session.
+      this.thread.resumed = true;
+    }
     await this.emit({
       method: "turn/completed",
       params: {

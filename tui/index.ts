@@ -6,6 +6,7 @@ import {
   InputRenderable,
   InputRenderableEvents,
   italic,
+  parseColor,
   ScrollBoxRenderable,
   SelectRenderable,
   SelectRenderableEvents,
@@ -19,22 +20,37 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   artifactAllowsTextSelection,
+  AsyncTaskGate,
+  attachToolDetails,
   compactSessionDetails,
   continuationRunArguments,
   discoverSessions,
   filterSessions,
+  formatTokenUsage,
   initialViewState,
   latestAgentUpdate,
+  modelPickerOptions,
+  newSessionRunArguments,
+  nextArtifact,
+  parseChatTranscript,
+  parseDejaHits,
+  parseModelCatalog,
   parseToolEventDetails,
   parseTraceActivities,
+  promptModeForSession,
   readTail,
   reduceView,
   sessionDescription,
   sessionDetails,
   sessionLabel,
+  statusGlyph,
   visibleArtifactTail,
   visibleSessions,
+  FALLBACK_MODELS,
   type Artifact,
+  type ChatEntry,
+  type DejaHit,
+  type ModelInfo,
   type Session,
   type ToolEventDetail,
   type TraceActivity,
@@ -70,12 +86,15 @@ interface ActivityRow {
   id: string;
   activity?: TraceActivity;
   detail?: ToolEventDetail;
+  chat?: ChatEntry;
   text: string;
   copyText: string;
 }
 
-type PromptMode = "steer" | "continue";
-type SearchMode = "sessions" | "artifact";
+// The TUI resolves "auto" once when the input opens. A status change can then
+// reject the captured command, but it can never convert prompt into steer.
+type PromptMode = "steer" | "prompt" | "continue" | "new";
+type SearchMode = "sessions" | "artifact" | "deja";
 
 async function main(): Promise<void> {
   const args = parseArguments(Bun.argv.slice(2));
@@ -100,13 +119,25 @@ async function main(): Promise<void> {
     let discoveredSessions: Session[] = [];
     let sessions: Session[] = [];
     let view: ViewState = initialViewState;
-    let refreshRunning = false;
+    const refreshGate = new AsyncTaskGate();
     let actionRunning = false;
     let detailsExpanded = false;
     let sessionQuery = "";
-    const artifactQueries: Record<Artifact, string> = { trace: "", output: "" };
+    const artifactQueries: Record<Artifact, string> = {
+      chat: "",
+      trace: "",
+      output: "",
+    };
     let searchMode: SearchMode | undefined;
     let promptMode: PromptMode | undefined;
+    let sessionsVisible = false;
+    let modelPickerOpen = false;
+    let dejaPickerOpen = false;
+    let models: ModelInfo[] = FALLBACK_MODELS;
+    let pendingModel: ModelInfo | undefined;
+    let pendingResume: DejaHit | undefined;
+    let dejaHits: DejaHit[] = [];
+    const dejaAvailable = Boolean(Bun.which("deja"));
     let artifactRows: ActivityRow[] = [];
     let rowRenderables: TextRenderable[] = [];
     let selectedRow = -1;
@@ -152,16 +183,76 @@ async function main(): Promise<void> {
       selectedBackgroundColor: palette.selected,
       selectedTextColor: palette.accent,
       showScrollIndicator: true,
+      renderAfter(buffer) {
+        const linesPerItem = 2;
+        const visibleItems = Math.max(
+          1,
+          Math.floor(this.height / linesPerItem),
+        );
+        const selectedIndex = this.getSelectedIndex();
+        const scrollOffset = Math.max(
+          0,
+          Math.min(
+            selectedIndex - Math.floor(visibleItems / 2),
+            Math.max(0, sessions.length - visibleItems),
+          ),
+        );
+        const accent = parseColor(palette.accent);
+        const success = parseColor(palette.success);
+        const warning = parseColor(palette.warning);
+        const danger = parseColor(palette.danger);
+        const labelX = 3;
+
+        for (const [visibleIndex, session] of sessions
+          .slice(scrollOffset, scrollOffset + visibleItems)
+          .entries()) {
+          const group = isLive(session) ? "LIVE" : "RECENT";
+          const statusColor =
+            session.status === "active" || session.status === "completed"
+              ? success
+              : session.status === "starting"
+                ? warning
+                : danger;
+          const rowY = visibleIndex * linesPerItem;
+          const provider = session.provider ?? "codex";
+
+          buffer.drawText(
+            group,
+            labelX,
+            rowY,
+            isLive(session) ? success : accent,
+          );
+          buffer.drawText(
+            statusGlyph(session.status),
+            labelX + group.length + 2,
+            rowY,
+            statusColor,
+          );
+          buffer.drawText(provider, labelX, rowY + 1, accent);
+          buffer.drawText(
+            session.status,
+            labelX + provider.length + 3,
+            rowY + 1,
+            statusColor,
+          );
+        }
+      },
     });
     const sessionsPanel = new BoxRenderable(renderer, {
-      width: "34%",
-      height: "100%",
+      position: "absolute",
+      left: "8%",
+      top: "8%",
+      width: "84%",
+      height: "84%",
+      zIndex: 15,
       border: true,
       borderStyle: "rounded",
       borderColor: palette.border,
       focusedBorderColor: palette.accent,
-      title: " Sessions · LIVE / RECENT ",
+      title: " Sessions · Enter open · Esc close ",
       padding: 1,
+      backgroundColor: palette.background,
+      visible: false,
     });
     sessionsPanel.add(sessionList);
 
@@ -172,19 +263,24 @@ async function main(): Promise<void> {
     });
     const detailsPanel = new BoxRenderable(renderer, {
       width: "100%",
-      height: 7,
+      height: 8,
       border: true,
       borderStyle: "rounded",
       borderColor: palette.border,
-      title: " Session · i details ",
+      title: " Session · i hide ",
       padding: 1,
+      visible: false,
     });
     detailsPanel.add(details);
 
-    const activityTab = new TextRenderable(renderer, {
-      content: " Activity ",
+    const chatTab = new TextRenderable(renderer, {
+      content: " Chat ",
       fg: palette.accent,
       attributes: TextAttributes.BOLD,
+    });
+    const activityTab = new TextRenderable(renderer, {
+      content: " Activity ",
+      fg: palette.dim,
     });
     const outputTab = new TextRenderable(renderer, {
       content: " Output ",
@@ -195,6 +291,7 @@ async function main(): Promise<void> {
       flexDirection: "row",
       gap: 1,
     });
+    tabsLeft.add(chatTab);
     tabsLeft.add(activityTab);
     tabsLeft.add(outputTab);
     const followIndicator = new TextRenderable(renderer, {
@@ -241,22 +338,14 @@ async function main(): Promise<void> {
     artifactPanel.add(tabsBar);
     artifactPanel.add(artifactScroll);
 
-    const right = new BoxRenderable(renderer, {
-      flexGrow: 1,
-      height: "100%",
-      flexDirection: "column",
-      gap: 1,
-    });
-    right.add(detailsPanel);
-    right.add(artifactPanel);
     const body = new BoxRenderable(renderer, {
       width: "100%",
       flexGrow: 1,
-      flexDirection: "row",
+      flexDirection: "column",
       gap: 1,
     });
-    body.add(sessionsPanel);
-    body.add(right);
+    body.add(detailsPanel);
+    body.add(artifactPanel);
 
     const statusLine = new TextRenderable(renderer, {
       content: "Watching for Rudder sessions",
@@ -268,6 +357,19 @@ async function main(): Promise<void> {
       fg: palette.dim,
       height: 1,
     });
+    const footerUsage = new TextRenderable(renderer, {
+      content: "",
+      fg: palette.dim,
+      height: 1,
+    });
+    const footerBar = new BoxRenderable(renderer, {
+      width: "100%",
+      height: 1,
+      flexDirection: "row",
+      justifyContent: "space-between",
+    });
+    footerBar.add(footer);
+    footerBar.add(footerUsage);
 
     const searchInput = new InputRenderable(renderer, {
       id: "search-input",
@@ -278,7 +380,6 @@ async function main(): Promise<void> {
       textColor: palette.text,
       focusedTextColor: palette.text,
       placeholderColor: palette.dim,
-      onSubmit: () => closeSearch(),
     });
     const searchPanel = new BoxRenderable(renderer, {
       position: "absolute",
@@ -306,24 +407,88 @@ async function main(): Promise<void> {
       textColor: palette.text,
       focusedTextColor: palette.text,
       placeholderColor: palette.dim,
-      onSubmit: () => void submitPrompt(),
     });
     const promptPanel = new BoxRenderable(renderer, {
+      width: "100%",
+      height: 3,
+      border: true,
+      borderStyle: "rounded",
+      borderColor: palette.border,
+      focusedBorderColor: palette.accent,
+      title: " Prompt ",
+      paddingLeft: 1,
+      paddingRight: 1,
+      backgroundColor: palette.background,
+    });
+    promptPanel.add(promptInput);
+
+    const modelPicker = new SelectRenderable(renderer, {
+      id: "model-picker",
+      width: "100%",
+      flexGrow: 1,
+      options: [],
+      showDescription: true,
+      wrapSelection: true,
+      backgroundColor: palette.panel,
+      focusedBackgroundColor: palette.panel,
+      textColor: palette.text,
+      focusedTextColor: palette.text,
+      descriptionColor: palette.dim,
+      selectedDescriptionColor: palette.text,
+      selectedBackgroundColor: palette.selected,
+      selectedTextColor: palette.accent,
+      showScrollIndicator: true,
+    });
+    const modelPanel = new BoxRenderable(renderer, {
       position: "absolute",
-      left: "15%",
-      top: "42%",
-      width: "70%",
-      height: 5,
-      zIndex: 10,
+      left: "27%",
+      top: "18%",
+      width: "46%",
+      height: "64%",
+      zIndex: 20,
       border: true,
       borderStyle: "double",
       borderColor: palette.accent,
-      title: " Prompt ",
+      title: " Model · Enter choose · Esc cancel ",
       padding: 1,
       backgroundColor: palette.background,
       visible: false,
     });
-    promptPanel.add(promptInput);
+    modelPanel.add(modelPicker);
+
+    const dejaPicker = new SelectRenderable(renderer, {
+      id: "deja-picker",
+      width: "100%",
+      flexGrow: 1,
+      options: [],
+      showDescription: true,
+      wrapSelection: true,
+      backgroundColor: palette.panel,
+      focusedBackgroundColor: palette.panel,
+      textColor: palette.text,
+      focusedTextColor: palette.text,
+      descriptionColor: palette.dim,
+      selectedDescriptionColor: palette.text,
+      selectedBackgroundColor: palette.selected,
+      selectedTextColor: palette.accent,
+      showScrollIndicator: true,
+    });
+    const dejaPanel = new BoxRenderable(renderer, {
+      position: "absolute",
+      left: "12%",
+      top: "14%",
+      width: "76%",
+      height: "72%",
+      zIndex: 20,
+      border: true,
+      borderStyle: "double",
+      borderColor: palette.accent,
+      title: " Resume past session · Enter pick · Esc cancel ",
+      padding: 1,
+      backgroundColor: palette.background,
+      visible: false,
+    });
+    dejaPanel.add(dejaPicker);
 
     const themePicker = new SelectRenderable(renderer, {
       id: "theme-picker",
@@ -374,18 +539,26 @@ async function main(): Promise<void> {
     });
     root.add(headerBar);
     root.add(body);
-    root.add(statusLine);
-    root.add(footer);
-    root.add(searchPanel);
     root.add(promptPanel);
+    root.add(statusLine);
+    root.add(footerBar);
+    root.add(sessionsPanel);
+    root.add(searchPanel);
     root.add(themePanel);
+    root.add(modelPanel);
+    root.add(dejaPanel);
     renderer.root.add(root);
-    sessionList.focus();
+    artifactScroll.focus();
+    view = { ...view, focus: "artifact" };
 
+    chatTab.onMouseDown = () => setArtifact("chat");
     activityTab.onMouseDown = () => setArtifact("trace");
     outputTab.onMouseDown = () => setArtifact("output");
     followIndicator.onMouseDown = () => resumeFollowing();
+    promptPanel.onMouseDown = () => openPrompt("auto");
     sessionsPanel.onMouseDown = () => focusSessions();
+    modelPanel.onMouseDown = () => modelPicker.focus();
+    dejaPanel.onMouseDown = () => dejaPicker.focus();
     sessionList.onMouseScroll = (event) => {
       focusSessions();
       const steps = Math.max(1, Math.round(event.scroll?.delta ?? 1));
@@ -425,8 +598,15 @@ async function main(): Promise<void> {
         if (themePickerOpen && option?.value) applyTheme(option.value);
       },
     );
+    // TODO(review): Confirm OpenTUI's keyboard ordering does not deliver Enter to both this ITEM_SELECTED handler and the global keypress handler.
     themePicker.on(SelectRenderableEvents.ITEM_SELECTED, () => {
       if (themePickerOpen) void commitThemePicker();
+    });
+    modelPicker.on(SelectRenderableEvents.ITEM_SELECTED, () => {
+      if (modelPickerOpen) commitModelPicker();
+    });
+    dejaPicker.on(SelectRenderableEvents.ITEM_SELECTED, () => {
+      if (dejaPickerOpen) commitDejaPicker();
     });
 
     searchInput.on(InputRenderableEvents.INPUT, (value: string) => {
@@ -445,7 +625,11 @@ async function main(): Promise<void> {
       (_index, option) => {
         const changed = option?.value !== view.selectedStateDir;
         view = reduceView(view, { type: "select", stateDir: option?.value });
-        if (changed) resetArtifactPosition();
+        if (changed) {
+          pendingModel = undefined;
+          pendingResume = undefined;
+          resetArtifactPosition();
+        }
         void updateSelectedSession();
         updateChrome();
       },
@@ -455,7 +639,7 @@ async function main(): Promise<void> {
       if (key.ctrl && key.name === "c") {
         key.preventDefault();
         key.stopPropagation();
-        shutdown();
+        void shutdown();
         return;
       }
       if (themePickerOpen) {
@@ -470,6 +654,30 @@ async function main(): Promise<void> {
         }
         return;
       }
+      if (modelPickerOpen) {
+        if (key.name === "escape" || key.name === "m") {
+          key.preventDefault();
+          key.stopPropagation();
+          closeModelPicker();
+        } else if (key.name === "return" || key.name === "enter") {
+          key.preventDefault();
+          key.stopPropagation();
+          commitModelPicker();
+        }
+        return;
+      }
+      if (dejaPickerOpen) {
+        if (key.name === "escape") {
+          key.preventDefault();
+          key.stopPropagation();
+          closeDejaPicker();
+        } else if (key.name === "return" || key.name === "enter") {
+          key.preventDefault();
+          key.stopPropagation();
+          commitDejaPicker();
+        }
+        return;
+      }
       if (searchMode) {
         if (key.name === "escape") {
           key.preventDefault();
@@ -478,7 +686,29 @@ async function main(): Promise<void> {
         } else if (key.name === "return" || key.name === "enter") {
           key.preventDefault();
           key.stopPropagation();
-          closeSearch();
+          if (searchMode === "deja") void submitDejaSearch();
+          else closeSearch();
+        }
+        return;
+      }
+      if (sessionsVisible) {
+        if (
+          key.name === "escape" ||
+          key.name === "tab" ||
+          key.name === "return" ||
+          key.name === "enter"
+        ) {
+          key.preventDefault();
+          key.stopPropagation();
+          hideSessions();
+        } else if (key.name === "/") {
+          key.preventDefault();
+          key.stopPropagation();
+          openSearch();
+        } else if (key.name === "q") {
+          key.preventDefault();
+          key.stopPropagation();
+          void shutdown();
         }
         return;
       }
@@ -506,6 +736,8 @@ async function main(): Promise<void> {
           "i",
           "/",
           "n",
+          "m",
+          "f",
           "c",
           "return",
           "enter",
@@ -518,24 +750,27 @@ async function main(): Promise<void> {
         key.stopPropagation();
       }
       if (key.name === "q") {
-        shutdown();
+        void shutdown();
         return;
       }
       if (key.name === "t") openThemePicker();
       else if (key.name === "r" && key.shift) openPrompt("continue");
       else if (key.name === "r") void refresh("Refreshing sessions…");
-      else if (key.name === "tab") {
-        view = reduceView(view, { type: "toggle-focus" });
-        focusCurrentPanel();
-      } else if (key.name === "o")
-        setArtifact(view.artifact === "trace" ? "output" : "trace");
-      else if (key.name === "s") openPrompt("steer");
+      else if (key.name === "tab") showSessions();
+      else if (key.name === "o") setArtifact(nextArtifactView());
+      else if (key.name === "s") openPrompt("auto");
+      else if (key.name === "n" && !key.shift) {
+        if (view.focus === "artifact" && artifactQueries[view.artifact].trim())
+          moveToSearchMatch(1);
+        else startNewSessionFlow();
+      }
+      else if (key.name === "m") openModelPicker();
+      else if (key.name === "f") openDejaSearch();
       else if (key.name === "x") void requestInterrupt();
       else if (key.name === "i") {
-        detailsExpanded = !detailsExpanded;
-        updateDetails();
+        cycleDetails();
       } else if (key.name === "/") openSearch();
-      else if (key.name === "n") moveToSearchMatch(key.shift ? -1 : 1);
+      else if (key.name === "n" && key.shift) moveToSearchMatch(-1);
       else if (key.name === "c") copyCurrentSelection();
       else if (
         (key.name === "return" || key.name === "enter") &&
@@ -632,6 +867,26 @@ async function main(): Promise<void> {
       artifactPanel.titleColor = palette.accent;
       statusLine.fg = palette.dim;
       footer.fg = palette.dim;
+      footerUsage.fg = palette.dim;
+      chatTab.fg = palette.accent;
+      sessionsPanel.backgroundColor = palette.background;
+      promptPanel.backgroundColor = palette.background;
+      promptPanel.focusedBorderColor = palette.accent;
+      for (const picker of [modelPicker, dejaPicker]) {
+        picker.backgroundColor = palette.panel;
+        picker.focusedBackgroundColor = palette.panel;
+        picker.textColor = palette.text;
+        picker.focusedTextColor = palette.text;
+        picker.descriptionColor = palette.dim;
+        picker.selectedDescriptionColor = palette.text;
+        picker.selectedBackgroundColor = palette.selected;
+        picker.selectedTextColor = palette.accent;
+      }
+      for (const panel of [modelPanel, dejaPanel]) {
+        panel.backgroundColor = palette.background;
+        panel.borderColor = palette.accent;
+        panel.titleColor = palette.accent;
+      }
       for (const input of [searchInput, promptInput]) {
         input.backgroundColor = palette.panel;
         input.focusedBackgroundColor = palette.selected;
@@ -639,11 +894,11 @@ async function main(): Promise<void> {
         input.focusedTextColor = palette.text;
         input.placeholderColor = palette.dim;
       }
-      for (const panel of [searchPanel, promptPanel]) {
-        panel.backgroundColor = palette.background;
-        panel.borderColor = palette.accent;
-        panel.titleColor = palette.accent;
-      }
+      searchPanel.backgroundColor = palette.background;
+      searchPanel.borderColor = palette.accent;
+      searchPanel.titleColor = palette.accent;
+      promptPanel.borderColor = palette.border;
+      promptPanel.titleColor = palette.accent;
       themePanel.backgroundColor = palette.background;
       themePanel.borderColor = palette.accent;
       themePanel.titleColor = palette.accent;
@@ -661,8 +916,11 @@ async function main(): Promise<void> {
     }
 
     function focusCurrentPanel(): void {
-      if (view.focus === "artifact") artifactScroll.focus();
-      else sessionList.focus();
+      if (view.focus === "sessions" && sessionsVisible) sessionList.focus();
+      else {
+        view = { ...view, focus: "artifact" };
+        artifactScroll.focus();
+      }
       updateChrome();
     }
 
@@ -733,15 +991,193 @@ async function main(): Promise<void> {
       closeSearch();
     }
 
-    function openPrompt(mode: PromptMode): void {
+    function showSessions(): void {
+      sessionsVisible = true;
+      sessionsPanel.visible = true;
+      view = { ...view, focus: "sessions" };
+      sessionList.focus();
+      updateChrome();
+    }
+
+    function hideSessions(): void {
+      sessionsVisible = false;
+      sessionsPanel.visible = false;
+      view = { ...view, focus: "artifact" };
+      artifactScroll.focus();
+      updateChrome();
+    }
+
+    function nextArtifactView(): Artifact {
+      return nextArtifact(view.artifact);
+    }
+
+    function cycleDetails(): void {
+      if (!detailsPanel.visible) {
+        detailsPanel.visible = true;
+        detailsExpanded = false;
+      } else if (!detailsExpanded) {
+        detailsExpanded = true;
+      } else {
+        detailsPanel.visible = false;
+        detailsExpanded = false;
+      }
+      updateDetails();
+    }
+
+    function availableModels(): ModelInfo[] {
+      if (promptMode === "new") return models;
+      const provider = selectedSession()?.provider;
+      return provider
+        ? models.filter((model) => model.provider === provider)
+        : models;
+    }
+
+    function openModelPicker(): void {
+      modelPickerOpen = true;
+      modelPanel.visible = true;
+      const options = modelPickerOptions(availableModels());
+      modelPicker.options = options.map((option) => ({
+        name: option.name,
+        description: option.description,
+        value: option.value,
+      }));
+      const current = pendingModel
+        ? options.findIndex((option) => option.model === pendingModel)
+        : options.findIndex((option) => option.model.default);
+      modelPicker.setSelectedIndex(Math.max(0, current));
+      modelPicker.focus();
+    }
+
+    function closeModelPicker(): void {
+      modelPickerOpen = false;
+      modelPanel.visible = false;
+      if (promptMode) promptInput.focus();
+      else focusCurrentPanel();
+      updateChrome();
+    }
+
+    function commitModelPicker(): void {
+      const selected = modelPicker.getSelectedOption()?.value as
+        | string
+        | undefined;
+      const option = modelPickerOptions(availableModels()).find(
+        (candidate) => candidate.value === selected,
+      );
+      if (!option) return;
+      if (option.disabled) {
+        setStatus(
+          `${option.model.provider} is ${option.model.note || "unavailable"}`,
+          true,
+        );
+        return;
+      }
+      pendingModel = option.model;
+      closeModelPicker();
+      setStatus(`Model: ${option.model.label || option.model.id}`);
+      updatePromptChrome();
+    }
+
+    function startNewSessionFlow(): void {
+      pendingResume = undefined;
+      pendingModel = undefined;
+      promptMode = "new";
+      openPromptInput();
+      openModelPicker();
+    }
+
+    function openDejaSearch(): void {
+      if (!dejaAvailable) {
+        setStatus("deja is not on PATH; install it to resume past sessions", true);
+        return;
+      }
+      searchMode = "deja";
+      searchInput.value = "";
+      searchInput.placeholder = "Search past Claude/Codex sessions…";
+      searchPanel.title = " deja find · Enter search · Esc cancel ";
+      searchPanel.visible = true;
+      searchInput.focus();
+    }
+
+    async function submitDejaSearch(): Promise<void> {
+      const terms = searchInput.value.trim();
+      searchPanel.visible = false;
+      searchMode = undefined;
+      if (!terms) {
+        focusCurrentPanel();
+        return;
+      }
+      setStatus(`Searching past sessions for “${terms}”…`);
+      try {
+        const child = Bun.spawn(
+          ["deja", "find", ...terms.split(/\s+/), "--json", "--quiet"],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+        const [stdout, exitCode] = await Promise.all([
+          new Response(child.stdout).text(),
+          child.exited,
+        ]);
+        if (exitCode !== 0) throw new Error(`deja find exited ${exitCode}`);
+        dejaHits = parseDejaHits(stdout);
+        if (dejaHits.length === 0) {
+          setStatus(`No resumable sessions matched “${terms}”`, true);
+          focusCurrentPanel();
+          return;
+        }
+        openDejaPicker();
+      } catch (error) {
+        setStatus(errorMessage(error), true);
+        focusCurrentPanel();
+      }
+    }
+
+    function openDejaPicker(): void {
+      dejaPickerOpen = true;
+      dejaPanel.visible = true;
+      dejaPicker.options = dejaHits.map((hit, index) => ({
+        name: `${hit.provider}  ${hit.project || "unknown project"}  ${hit.date}`,
+        description: hit.openingPrompt.slice(0, 120) || hit.sessionId,
+        value: String(index),
+      }));
+      dejaPicker.setSelectedIndex(0);
+      dejaPicker.focus();
+      setStatus(`${dejaHits.length} resumable sessions found`);
+    }
+
+    function closeDejaPicker(): void {
+      dejaPickerOpen = false;
+      dejaPanel.visible = false;
+      focusCurrentPanel();
+    }
+
+    function commitDejaPicker(): void {
+      const index = Number(dejaPicker.getSelectedOption()?.value ?? -1);
+      const hit = dejaHits[index];
+      closeDejaPicker();
+      if (!hit) return;
+      pendingResume = hit;
+      pendingModel = undefined;
+      promptMode = "new";
+      openPromptInput();
+      setStatus(
+        `Resuming ${hit.provider} session ${hit.sessionId.slice(0, 12)}… — type the next prompt`,
+      );
+    }
+
+    function openPrompt(mode: "auto" | "continue"): void {
       const session = selectedSession();
-      if (mode === "steer" && (!session || session.status !== "active")) {
-        setStatus("Only an active session can be steered", true);
+    const route = promptModeForSession(session);
+    if (mode === "auto" && !route) {
+        setStatus(
+          session
+            ? `Session is ${session.status}; press n for a new session`
+            : "No session selected; press n for a new session",
+          true,
+        );
         return;
       }
       if (
         mode === "continue" &&
-        (!session || isLive(session) || !session.threadId || !session.cwd)
+    promptModeForSession(session) !== "continue"
       ) {
         setStatus(
           "Select a finished session with a thread and working directory to continue",
@@ -749,26 +1185,66 @@ async function main(): Promise<void> {
         );
         return;
       }
-      promptMode = mode;
+    promptMode = mode === "auto" ? route : mode;
+    if (promptMode === "steer" || promptMode === "prompt") {
+    pendingModel = undefined;
+    }
+      openPromptInput();
+    }
+
+    function openPromptInput(): void {
       view = reduceView(view, { type: "open-steer" });
       promptInput.value = "";
-      promptInput.placeholder =
-        mode === "steer"
-          ? `New direction for ${session?.provider === "claude" ? "Claude" : "Codex"}…`
-          : `What should the resumed ${session?.provider === "claude" ? "Claude session" : "Codex thread"} do?`;
-      promptPanel.title =
-        mode === "steer"
-          ? " Steer active turn · Enter send · Esc cancel "
-          : " Continue thread in a new run · Enter start · Esc cancel ";
-      promptPanel.visible = true;
+      updatePromptChrome();
       promptInput.focus();
+      updateChrome();
+    }
+
+    function updatePromptChrome(): void {
+      const session = selectedSession();
+    const modelLabel =
+    pendingModel && (promptMode === "new" || promptMode === "continue")
+        ? (pendingModel.label ?? pendingModel.id)
+        : (session?.model ?? "default model");
+      if (promptMode === "new") {
+        const target = pendingResume
+          ? `resume ${pendingResume.provider} ${pendingResume.sessionId.slice(0, 12)}…`
+          : `new ${pendingModel?.provider ?? "codex"} session`;
+        promptPanel.title = ` ${target} · ${modelLabel} · Enter start · Esc cancel `;
+        promptInput.placeholder = `First prompt for the ${pendingResume ? "resumed" : "new"} session in ${process.cwd()}…`;
+        return;
+      }
+    const route =
+    promptMode === "steer" ||
+    promptMode === "prompt" ||
+    promptMode === "continue"
+      ? promptMode
+      : undefined;
+      if (!session || !route) {
+        promptPanel.title = " Prompt · n new session ";
+        promptInput.placeholder = "No promptable session selected — press n to start one";
+        return;
+      }
+      if (promptMode === "continue" || route === "continue") {
+        promptPanel.title = ` continue thread · ${modelLabel} · Enter start · Esc cancel `;
+        promptInput.placeholder = `What should the resumed ${session.provider === "claude" ? "Claude session" : "Codex thread"} do?`;
+      } else if (route === "steer") {
+        promptPanel.title = ` steer active turn · ${modelLabel} · Enter send `;
+        promptInput.placeholder = `New direction for ${session.provider === "claude" ? "Claude" : "Codex"}…`;
+      } else {
+        promptPanel.title = ` prompt idle session · ${modelLabel} · Enter send `;
+        promptInput.placeholder = "Next task for this session…";
+      }
     }
 
     function closePrompt(): void {
+      pendingModel = undefined;
+      pendingResume = undefined;
       promptMode = undefined;
       view = reduceView(view, { type: "close-steer" });
-      promptPanel.visible = false;
-      sessionList.focus();
+      view = { ...view, focus: "artifact" };
+      artifactScroll.focus();
+      updatePromptChrome();
       updateChrome();
     }
 
@@ -777,13 +1253,106 @@ async function main(): Promise<void> {
       const mode = promptMode;
       const message = promptInput.value.trim();
       if (!message) return;
-      if (mode === "steer") await submitSteer(message);
-      else await continueThread(message);
+      if (mode === "new") {
+        await startNewSession(message);
+        return;
+      }
+      const session = selectedSession();
+    const route = mode;
+      if (route === "steer") await submitSteer(message);
+      else if (route === "prompt") await submitIdlePrompt(message);
+      else if (route === "continue") await continueThread(message);
+      else setStatus("Session can no longer accept a prompt", true);
+    }
+
+    async function submitIdlePrompt(message: string): Promise<void> {
+      const session = selectedSession();
+    if (!session || session.status !== "idle") {
+    setStatus("Session is no longer idle; the prompt was not sent", true);
+    return;
+    }
+      actionRunning = true;
+      closePrompt();
+      setStatus("Sending prompt…");
+      let scratchDirectory = "";
+      try {
+        scratchDirectory = await mkdtemp(join(tmpdir(), "rudder-tui-prompt-"));
+        await chmod(scratchDirectory, 0o700);
+        const messageFile = join(scratchDirectory, "message.md");
+        await writeFile(messageFile, `${message}\n`, { mode: 0o600 });
+        const result = await runControl(args.rudder, [
+          "prompt",
+          "--state-dir",
+          session.stateDir,
+          "--message-file",
+          messageFile,
+        ]);
+        setStatus(result || "Prompt accepted");
+        await refresh();
+        setTimeout(() => void refresh(), 300);
+      } catch (error) {
+        setStatus(errorMessage(error), true);
+      } finally {
+        actionRunning = false;
+        if (scratchDirectory)
+          await rm(scratchDirectory, { recursive: true, force: true });
+      }
+    }
+
+    async function startNewSession(message: string): Promise<void> {
+      actionRunning = true;
+      const resume = pendingResume;
+      const model = pendingModel;
+      closePrompt();
+      try {
+        const provider = resume?.provider ?? model?.provider ?? "codex";
+        // TODO(review): Deja hits do not expose their original cwd, so resumes currently use the TUI launch directory.
+        const cwd = process.cwd();
+        const baseDirectory = join(cwd, ".scratch", "rudder-tui");
+        await mkdir(baseDirectory, { recursive: true, mode: 0o700 });
+        await chmod(baseDirectory, 0o700);
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const stateDirectory = join(baseDirectory, `${stamp}.run`);
+        await mkdir(stateDirectory, { mode: 0o700 });
+        const promptFile = join(stateDirectory, "prompt.md");
+        await writeFile(promptFile, `${message}\n`, { mode: 0o600 });
+        const runArgs = newSessionRunArguments({
+          provider,
+          model: model?.id,
+          cwd,
+          promptFile,
+          stateDirectory,
+          ...(resume ? { resumeThreadId: resume.sessionId } : {}),
+        });
+        const child = Bun.spawn([args.rudder, ...runArgs], {
+          cwd,
+          stdout: "ignore",
+          stderr: "ignore",
+          stdin: "ignore",
+        });
+        child.unref();
+        args.stateDirs.push(stateDirectory);
+        view = reduceView(view, { type: "select", stateDir: stateDirectory });
+        setStatus(
+          resume
+            ? `Resuming ${resume.provider} session…`
+            : `Starting ${provider} session…`,
+        );
+        setTimeout(() => void refresh(), 250);
+        setTimeout(() => void refresh(), 1_000);
+      } catch (error) {
+        setStatus(errorMessage(error), true);
+      } finally {
+        actionRunning = false;
+      }
     }
 
     async function submitSteer(message: string): Promise<void> {
       const session = selectedSession();
-      if (!session || session.status !== "active") return;
+    if (!session || session.status !== "active") {
+    setStatus("Turn is no longer active; the steer was not sent", true);
+    return;
+    }
       actionRunning = true;
       closePrompt();
       setStatus(`Steering ${sessionLabel(session)}…`);
@@ -814,6 +1383,7 @@ async function main(): Promise<void> {
     async function continueThread(message: string): Promise<void> {
       const session = selectedSession();
       if (!session?.threadId || !session.cwd || isLive(session)) return;
+      const modelOverride = pendingModel;
       actionRunning = true;
       closePrompt();
       try {
@@ -825,10 +1395,16 @@ async function main(): Promise<void> {
         await mkdir(stateDirectory, { mode: 0o700 });
         const promptFile = join(stateDirectory, "prompt.md");
         await writeFile(promptFile, `${message}\n`, { mode: 0o600 });
+        const overrides =
+          modelOverride &&
+          modelOverride.provider === (session.provider ?? "codex")
+            ? { model: modelOverride.id }
+            : {};
         const runArgs = continuationRunArguments(
           session,
           promptFile,
           stateDirectory,
+          overrides,
         );
         const child = Bun.spawn([args.rudder, ...runArgs], {
           cwd: session.cwd,
@@ -852,29 +1428,35 @@ async function main(): Promise<void> {
     async function requestInterrupt(): Promise<void> {
       if (actionRunning) return;
       const session = selectedSession();
-      if (!session || session.status !== "active") {
-        setStatus("Only an active session can be interrupted", true);
+      if (
+        !session ||
+        (session.status !== "active" && session.status !== "idle")
+      ) {
+        setStatus("Only an active or idle session can be stopped", true);
         return;
       }
+      const idle = session.status === "idle";
       const now = Date.now();
       if (view.interruptArmedUntil < now) {
         view = reduceView(view, { type: "arm-interrupt", now });
         setStatus(
-          "Press x again within 2 seconds to interrupt the selected turn",
+          idle
+            ? "Press x again within 2 seconds to end the idle session"
+            : "Press x again within 2 seconds to interrupt the selected turn",
           true,
         );
         return;
       }
       view = reduceView(view, { type: "clear-interrupt" });
       actionRunning = true;
-      setStatus("Interrupting selected turn…", true);
+      setStatus(idle ? "Ending idle session…" : "Interrupting selected turn…", true);
       try {
         const result = await runControl(args.rudder, [
-          "interrupt",
+          idle ? "stop" : "interrupt",
           "--state-dir",
           session.stateDir,
         ]);
-        setStatus(result || "Interrupt requested");
+        setStatus(result || (idle ? "Shutdown requested" : "Interrupt requested"));
         await refresh();
       } catch (error) {
         setStatus(errorMessage(error), true);
@@ -884,26 +1466,24 @@ async function main(): Promise<void> {
     }
 
     async function refresh(reason?: string): Promise<void> {
-      if (refreshRunning || destroyed) return;
-      refreshRunning = true;
-      if (reason) setStatus(reason);
-      try {
-        discoveredSessions = visibleSessions(
-          await discoverSessions({
-            roots: args.roots,
-            stateDirs: args.stateDirs,
-          }),
-          args.includeAll,
-          args.stateDirs,
-        );
-        applySessionFilter();
-        await updateSelectedSession();
-        if (reason) setStatus("Watching for session changes");
-      } catch (error) {
-        setStatus(errorMessage(error), true);
-      } finally {
-        refreshRunning = false;
-      }
+      return refreshGate.run(async () => {
+        if (reason) setStatus(reason);
+        try {
+          discoveredSessions = visibleSessions(
+            await discoverSessions({
+              roots: args.roots,
+              stateDirs: args.stateDirs,
+            }),
+            args.includeAll,
+            args.stateDirs,
+          );
+          applySessionFilter();
+          await updateSelectedSession();
+          if (reason) setStatus("Watching for session changes");
+        } catch (error) {
+          setStatus(errorMessage(error), true);
+        }
+      });
     }
 
     function applySessionFilter(): void {
@@ -951,13 +1531,36 @@ async function main(): Promise<void> {
       const artifactPath =
         view.artifact === "trace" ? session.tracePath : session.outputPath;
       const [content, eventContent] = await Promise.all([
-        readTail(artifactPath, ARTIFACT_TAIL_BYTES),
-        view.artifact === "trace"
-          ? readTail(session.eventsPath, ARTIFACT_TAIL_BYTES)
-          : "",
+        view.artifact === "chat"
+          ? ""
+          : readTail(artifactPath, ARTIFACT_TAIL_BYTES),
+        view.artifact === "output"
+          ? ""
+          : readTail(session.eventsPath, ARTIFACT_TAIL_BYTES),
       ]);
       if (session.stateDir !== view.selectedStateDir) return;
-      if (view.artifact === "trace") {
+      if (view.artifact === "chat") {
+        const entries = parseChatTranscript(eventContent, session.threadId);
+        const rows = entries.map((entry, index) => ({
+          id: `chat:${entry.itemId ?? index}`,
+          chat: entry,
+          text: entry.text,
+          copyText: entry.text,
+        }));
+        setArtifactRows(
+          rows.length > 0
+            ? rows
+            : [
+                {
+                  id: "empty",
+                  text: session.status === "starting"
+                    ? "Session is starting…"
+                    : "No conversation yet — type below to send a prompt.",
+                  copyText: "",
+                },
+              ],
+        );
+      } else if (view.artifact === "trace") {
         let activities = parseTraceActivities(content);
         const fullUpdate = latestAgentUpdate(eventContent);
         if (fullUpdate) {
@@ -1051,9 +1654,11 @@ async function main(): Promise<void> {
         });
         renderable.onMouseDown = () => {
           focusArtifact();
+          const previousRow = selectedRow;
           selectedRow = index;
+          refreshArtifactRow(previousRow);
           if (row.activity?.kind === "tool") toggleTool(row.id);
-          else renderArtifactRows(true);
+          else refreshArtifactRow(index);
         };
         artifactScroll.add(renderable);
         return renderable;
@@ -1069,6 +1674,12 @@ async function main(): Promise<void> {
     ): string | StyledText {
       const selection = selected ? t`${bold(fg(palette.accent)("▸ "))}` : t``;
       const marker = match ? t`${bold(fg(palette.warning)("◆ "))}` : t``;
+      if (row.chat)
+        return new StyledText([
+          ...selection.chunks,
+          ...marker.chunks,
+          ...renderChatEntry(row.chat).chunks,
+        ]);
       if (view.artifact === "output" || !row.activity)
         return new StyledText([
           ...selection.chunks,
@@ -1082,6 +1693,17 @@ async function main(): Promise<void> {
       return new StyledText(chunks);
     }
 
+    function refreshArtifactRow(index: number): void {
+      const row = artifactRows[index];
+      const renderable = rowRenderables[index];
+      if (!row || !renderable) return;
+      renderable.content = renderArtifactRow(
+        row,
+        rowMatchesQuery(row),
+        index === selectedRow,
+      );
+    }
+
     function toggleSelectedTool(): void {
       const row = artifactRows[selectedRow];
       if (row?.activity?.kind === "tool") toggleTool(row.id);
@@ -1089,6 +1711,7 @@ async function main(): Promise<void> {
 
     function moveSelectedRow(direction: number): void {
       if (artifactRows.length === 0) return;
+      const previousRow = selectedRow;
       if (selectedRow < 0)
         selectedRow = direction > 0 ? 0 : artifactRows.length - 1;
       else
@@ -1097,7 +1720,8 @@ async function main(): Promise<void> {
           Math.min(artifactRows.length - 1, selectedRow + direction),
         );
       artifactFollowing = false;
-      renderArtifactRows(true);
+      refreshArtifactRow(previousRow);
+      refreshArtifactRow(selectedRow);
       artifactScroll.scrollChildIntoView(`artifact-row-${selectedRow}`);
       updateChrome();
     }
@@ -1105,9 +1729,7 @@ async function main(): Promise<void> {
     function toggleTool(id: string): void {
       if (expandedToolIDs.has(id)) expandedToolIDs.delete(id);
       else expandedToolIDs.add(id);
-      renderArtifactRows(true);
-      if (selectedRow >= 0)
-        artifactScroll.scrollChildIntoView(`artifact-row-${selectedRow}`);
+      refreshArtifactRow(selectedRow);
       updateChrome();
     }
 
@@ -1188,10 +1810,10 @@ async function main(): Promise<void> {
 
     function updateDetails(): void {
       const session = selectedSession();
-      detailsPanel.height = detailsExpanded ? 11 : 7;
+      detailsPanel.height = detailsExpanded ? 12 : 8;
       detailsPanel.title = detailsExpanded
-        ? " Session · i compact "
-        : " Session · i details ";
+        ? " Session · i hide "
+        : " Session · i expand ";
       details.content = renderSessionDetails(
         session,
         detailsExpanded
@@ -1201,32 +1823,52 @@ async function main(): Promise<void> {
     }
 
     function updateChrome(): void {
-      const activitySelected = view.artifact === "trace";
-      activityTab.fg = activitySelected ? palette.accent : palette.dim;
-      activityTab.attributes = activitySelected
-        ? TextAttributes.BOLD
-        : TextAttributes.NONE;
-      outputTab.fg = activitySelected ? palette.dim : palette.accent;
-      outputTab.attributes = activitySelected
-        ? TextAttributes.NONE
-        : TextAttributes.BOLD;
+      const tabs: Array<[TextRenderable, Artifact]> = [
+        [chatTab, "chat"],
+        [activityTab, "trace"],
+        [outputTab, "output"],
+      ];
+      for (const [tab, artifact] of tabs) {
+        const selected = view.artifact === artifact;
+        tab.fg = selected ? palette.accent : palette.dim;
+        tab.attributes = selected ? TextAttributes.BOLD : TextAttributes.NONE;
+      }
       followIndicator.content = artifactFollowing
         ? " FOLLOWING "
         : ` PAUSED${unseenRows > 0 ? ` · ${unseenRows} new` : ""} · End resume `;
       followIndicator.fg = artifactFollowing
         ? palette.success
         : palette.warning;
+      const session = selectedSession();
       const query = artifactQueries[view.artifact];
-      artifactPanel.title = query ? ` Timeline · /${query} ` : " Timeline ";
+      const project = session
+        ? sessionLabel(session).replace(/^\S+\s+/, "")
+        : "no session";
+      artifactPanel.title = query
+        ? ` ${project} · /${query} `
+        : ` ${project} `;
       sessionsPanel.borderColor =
         view.focus === "sessions" ? palette.accent : palette.border;
       artifactPanel.borderColor =
         view.focus === "artifact" ? palette.accent : palette.border;
       footer.content = contextualHelp(
         view.focus,
-        selectedSession(),
+        session,
         Boolean(query),
+        dejaAvailable,
       );
+      footerUsage.content = sessionUsageSummary(session);
+      updatePromptChrome();
+    }
+
+    function sessionUsageSummary(session: Session | undefined): string {
+      if (!session) return "";
+      const parts: string[] = [];
+      if (session.model) parts.push(session.model);
+      const usage = formatTokenUsage(session.tokenUsage);
+      if (usage) parts.push(usage);
+      parts.push(session.status);
+      return parts.join(" · ");
     }
 
     function setStatus(message: string, danger = false): void {
@@ -1238,6 +1880,7 @@ async function main(): Promise<void> {
     const done = new Promise<void>((resolve) => {
       resolveDone = resolve;
     });
+    let shutdownPromise: Promise<void> | undefined;
     const refreshTimer = setInterval(() => void refresh(), args.interval);
     const signalNames: NodeJS.Signals[] = [
       "SIGINT",
@@ -1247,16 +1890,31 @@ async function main(): Promise<void> {
     ];
     for (const signal of signalNames) process.once(signal, shutdown);
 
-    function shutdown(): void {
-      if (destroyed) return;
-      destroyed = true;
-      clearInterval(refreshTimer);
-      for (const signal of signalNames) process.off(signal, shutdown);
-      renderer.destroy();
-      resolveDone?.();
+    function shutdown(): Promise<void> {
+      if (shutdownPromise) return shutdownPromise;
+      shutdownPromise = (async () => {
+        clearInterval(refreshTimer);
+        for (const signal of signalNames) process.off(signal, shutdown);
+        await refreshGate.stop();
+        if (!destroyed) {
+          renderer.destroy();
+          destroyed = true;
+        }
+        resolveDone?.();
+      })();
+      return shutdownPromise;
     }
 
     applyTheme(activeThemeName);
+    void (async () => {
+      try {
+        models = parseModelCatalog(
+          await runControl(args.rudder, ["models", "--json"]),
+        );
+      } catch {
+        models = FALLBACK_MODELS;
+      }
+    })();
     await refresh();
     await done;
   } finally {
@@ -1299,6 +1957,23 @@ function sessionStatusColor(status: string): string {
   return palette.text;
 }
 
+function renderChatEntry(entry: ChatEntry): StyledText {
+  if (entry.kind === "user")
+    return t`${bold(fg(palette.accent)("❯"))} ${bold(fg(palette.text)(entry.text))}`;
+  if (entry.kind === "agent") return t`${fg(palette.text)(entry.text)}`;
+  if (entry.kind === "thought")
+    return t`${italic(fg(palette.dim)(entry.text))}`;
+  const status = entry.status ?? "running";
+  const glyph = status === "completed" ? "✓" : status === "failed" ? "×" : "◐";
+  const color =
+    status === "completed"
+      ? palette.success
+      : status === "failed"
+        ? palette.danger
+        : palette.warning;
+  return t`  ${fg(color)(glyph)} ${fg(palette.dim)(entry.text)}`;
+}
+
 function renderTraceActivity(
   activity: TraceActivity,
   detail?: ToolEventDetail,
@@ -1317,8 +1992,12 @@ function renderTraceActivity(
     const durationMs = detail?.durationMs ?? activity.durationMs;
     const duration =
       durationMs === undefined ? "" : `  ${formatDuration(durationMs)}`;
-    const label = activity.label ?? "tool";
-    return t`${fg(color)(glyph)} ${bold(fg(color)(label))} ${fg(palette.text)(activity.text)}${fg(palette.dim)(duration)} ${fg(palette.dim)("›")}`;
+    const subAgent = detail?.type === "subAgentActivity";
+    const label = subAgent ? "agent" : (activity.label ?? "tool");
+    const text = subAgent
+      ? `${detail.activityKind ?? "activity"} ${detail.agentPath ?? detail.agentThreadId ?? "sub-agent"}`
+      : activity.text;
+    return t`${fg(color)(glyph)} ${bold(fg(color)(label))} ${fg(palette.text)(text)}${fg(palette.dim)(duration)} ${fg(palette.dim)("›")}`;
   }
   if (activity.kind === "message")
     return t`${fg(palette.accent)("›")} ${fg(palette.text)(activity.text)}`;
@@ -1353,6 +2032,11 @@ function renderToolDetail(
       ...t`\n  ${fg(palette.dim)("cwd    ")}  ${fg(palette.accent)(detail.cwd)}`
         .chunks,
     );
+  if (detail.agentThreadId)
+    chunks.push(
+      ...t`\n  ${fg(palette.dim)("thread ")}  ${fg(palette.accent)(detail.agentThreadId)}`
+        .chunks,
+    );
   if (detail.input && Object.keys(detail.input).length > 0)
     chunks.push(
       ...t`\n  ${fg(palette.dim)("input  ")}  ${fg(palette.text)(JSON.stringify(detail.input, null, 2))}`
@@ -1364,30 +2048,6 @@ function renderToolDetail(
         .chunks,
     );
   return new StyledText(chunks);
-}
-
-function attachToolDetails(
-  activities: TraceActivity[],
-  details: ToolEventDetail[],
-): Array<ToolEventDetail | undefined> {
-  const used = new Set<string>();
-  return activities.map((activity) => {
-    if (activity.kind !== "tool") return undefined;
-    const summary = activity.text.replace(/…$/, "").toLocaleLowerCase();
-    const match = details.find((detail) => {
-      if (used.has(detail.id)) return false;
-      const text =
-        `${detail.command || ""} ${detail.query || ""} ${detail.toolName || ""}`.toLocaleLowerCase();
-      if (summary && (text.includes(summary) || summary.includes(text.trim())))
-        return true;
-      if (activity.label === "files") return detail.type === "fileChange";
-      if (activity.label?.toLocaleLowerCase().includes("websearch"))
-        return detail.type === "webSearch";
-      return activity.label === "shell" && detail.type === "commandExecution";
-    });
-    if (match) used.add(match.id);
-    return match;
-  });
 }
 
 function activitySearchText(
@@ -1404,6 +2064,9 @@ function activitySearchText(
     detail?.output,
     detail?.query,
     detail?.toolName,
+    detail?.agentThreadId,
+    detail?.agentPath,
+    detail?.activityKind,
     detail?.input ? JSON.stringify(detail.input) : undefined,
   ]
     .filter(Boolean)
@@ -1419,6 +2082,7 @@ function activityCopyText(
     detail.command || detail.query || activity.text,
     `status: ${detail.status}${detail.exitCode === undefined ? "" : ` (exit ${detail.exitCode})`}`,
     detail.cwd ? `cwd: ${detail.cwd}` : "",
+    detail.agentThreadId ? `thread: ${detail.agentThreadId}` : "",
     detail.output || "",
   ]
     .filter(Boolean)
@@ -1429,20 +2093,28 @@ function contextualHelp(
   focus: ViewState["focus"],
   session: Session | undefined,
   hasQuery: boolean,
+  dejaAvailable = false,
 ): string {
-  if (focus === "artifact")
-    return `j/k row   wheel/↑↓ scroll   Enter expand   / search${hasQuery ? "   n/N match" : ""}   c copy   End follow   o tab   t theme   Tab sessions   q quit`;
+  const find = dejaAvailable ? "   f find past" : "";
+  if (focus === "sessions")
+    return `j/k select   / filter   Enter open   Esc close   q quit`;
   const action =
     session?.status === "active"
       ? "s steer   x x stop"
-      : session
-        ? "R continue"
-        : "";
-  return `j/k select   / filter   i details   c copy thread   ${action}   t theme   Tab timeline   r reload   q quit`;
+      : session?.status === "idle"
+        ? "s prompt   x x stop"
+        : session
+          ? "s continue"
+          : "";
+  return `s prompt   n new   m model${find}   ${action ? `${action}   ` : ""}o view   i info   Tab sessions   t theme   q quit`;
 }
 
 function isLive(session: Session): boolean {
-  return session.status === "active" || session.status === "starting";
+  return (
+    session.status === "active" ||
+    session.status === "idle" ||
+    session.status === "starting"
+  );
 }
 
 function formatDuration(milliseconds: number): string {

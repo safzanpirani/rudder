@@ -57,7 +57,7 @@ func (r *controller) acceptControl() {
 				return
 			}
 			select {
-			case <-r.done:
+			case <-r.sessionDone:
 				return
 			default:
 			}
@@ -66,7 +66,7 @@ func (r *controller) acceptControl() {
 				timer := time.NewTimer(retryDelay)
 				select {
 				case <-timer.C:
-				case <-r.done:
+				case <-r.sessionDone:
 					if !timer.Stop() {
 						<-timer.C
 					}
@@ -113,6 +113,22 @@ func (r *controller) handleControl(conn net.Conn) {
 			break
 		}
 		response.OK = true
+	case "prompt":
+		if request.Text == "" {
+			response.Error = "prompt text is empty"
+			break
+		}
+		if err := r.prompt(request.Text); err != nil {
+			response.Error = err.Error()
+			break
+		}
+		response.OK = true
+	case "shutdown":
+		if err := r.shutdown(); err != nil {
+			response.Error = err.Error()
+			break
+		}
+		response.OK = true
 	default:
 		response.Error = fmt.Sprintf("unknown control command %q", request.Command)
 	}
@@ -153,6 +169,68 @@ func (r *controller) steer(text string) error {
 	return nil
 }
 
+// prompt starts a new turn on the existing thread. It is only valid while the
+// session is idle and is never converted into a steer (or vice versa).
+func (r *controller) prompt(text string) error {
+	if !r.cfg.Idle {
+		return errors.New("session was not started with --idle; use a new run to continue the thread")
+	}
+	state := r.store.snapshot()
+	if state.Status != "idle" {
+		if state.Status == "active" {
+			return errors.New("a turn is active; steer it instead")
+		}
+		return fmt.Errorf("session is not idle: status=%s", state.Status)
+	}
+	request := promptRequest{text: text, observedTurns: state.Turns, reply: make(chan error, 1)}
+	// TODO(review): Propagate custom client deadlines if --timeout must guarantee that no turn starts after the client stops waiting.
+	select {
+	case r.promptCh <- request:
+	case <-r.sessionDone:
+		return errors.New("session ended before the prompt was accepted")
+	case <-time.After(5 * time.Second):
+		return errors.New("session did not accept the prompt; it may no longer be idle")
+	}
+	select {
+	case err := <-request.reply:
+		if err != nil {
+			return err
+		}
+	case <-time.After(45 * time.Second):
+		return errors.New("timed out waiting for turn/start")
+	case <-r.sessionDone:
+		return errors.New("session ended while waiting for turn/start")
+	}
+	r.tracef("[prompt] accepted: %s", oneLine(text, 180))
+	return nil
+}
+
+// shutdown gracefully ends an idle session.
+func (r *controller) shutdown() error {
+	if !r.cfg.Idle {
+		return errors.New("session was not started with --idle")
+	}
+	accepted := false
+	status := ""
+	r.turnMu.Lock()
+	if err := r.store.update(func(state *runState) {
+		status = state.Status
+		if !r.sessionEnded && state.Status == "idle" {
+			state.Status = "stopping"
+			accepted = true
+		}
+	}); err != nil {
+		r.turnMu.Unlock()
+		return fmt.Errorf("persist stopping state: %w", err)
+	}
+	r.turnMu.Unlock()
+	if !accepted {
+		return fmt.Errorf("session is not idle: status=%s", status)
+	}
+	r.shutdownOnce.Do(func() { close(r.shutdownCh) })
+	return nil
+}
+
 func (r *controller) interrupt() error {
 	state := r.store.snapshot()
 	if state.Status != "active" || state.ThreadID == "" || state.TurnID == "" {
@@ -162,11 +240,17 @@ func (r *controller) interrupt() error {
 		"threadId": state.ThreadID,
 		"turnId":   state.TurnID,
 	}, nil, 30*time.Second)
+	if r.cfg.Idle && rpcErr == nil {
+		// Idle sessions survive an interrupt: end the turn, keep the child,
+		// and let the run loop return to idle for the next prompt.
+		r.finishTurn("interrupted", "")
+		return nil
+	}
 	r.stopChild.Store(true)
 	if rpcErr != nil {
 		r.tracef("[warn] turn/interrupt failed; forcing local teardown: %v", rpcErr)
 	}
-	r.finish("interrupted", "")
+	r.endSession("interrupted", "")
 	terminateProcessTree(r.child, false)
 	finalState := r.store.snapshot()
 	if finalState.Status == "interrupted" {
