@@ -19,6 +19,7 @@ type providerModel struct {
 }
 
 var codexEfforts = []string{"none", "low", "medium", "high", "xhigh", "max"}
+var piEfforts = []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 
 var modelCatalog = []providerModel{
 	{Provider: providerCodex, ID: "gpt-5.6-sol", Label: "GPT-5.6-Sol", Efforts: codexEfforts, Default: true, Available: true},
@@ -28,7 +29,8 @@ var modelCatalog = []providerModel{
 	{Provider: providerClaude, ID: "claude-opus-5", Label: "Claude Opus 5", Default: true, Available: true},
 	{Provider: providerClaude, ID: "claude-sonnet-5", Label: "Claude Sonnet 5", Available: true},
 	{Provider: providerClaude, ID: "claude-haiku-4-5-20251001", Label: "Claude Haiku 4.5", Available: true},
-	{Provider: "opencode", Available: false, Note: "coming soon"},
+	{Provider: providerOpenCode, ID: "openrouter/deepseek/deepseek-v4-flash-vision-exp", Label: "DeepSeek V4 Flash Vision Exp", Default: true, Available: true},
+	{Provider: providerPi, ID: "openrouter/deepseek/deepseek-v4-flash-vision-exp", Label: "DeepSeek V4 Flash Vision Exp", Efforts: piEfforts, Default: true, Available: true},
 }
 
 func defaultModel(provider string) string {

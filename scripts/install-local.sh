@@ -24,14 +24,17 @@ bun install --cwd "$repo_dir" --frozen-lockfile
 )
 go build -C "$repo_dir" -o rudder .
 
-mkdir -p "$bin_dir" "$install_dir/tui" "$install_dir/claude"
+mkdir -p "$bin_dir" "$install_dir/tui" "$install_dir/adapter" "$install_dir/claude" "$install_dir/opencode" "$install_dir/pi"
 binary_tmp=$(mktemp "$bin_dir/.rudder.XXXXXX")
 /bin/cp "$repo_dir/rudder" "$binary_tmp"
 chmod 0755 "$binary_tmp"
 /bin/mv "$binary_tmp" "$bin_dir/rudder"
 /bin/cp "$repo_dir/package.json" "$repo_dir/bun.lock" "$install_dir/"
 /bin/cp "$repo_dir/tui/"*.ts "$install_dir/tui/"
+/bin/cp "$repo_dir/adapter/"*.ts "$install_dir/adapter/"
 /bin/cp "$repo_dir/claude/"*.ts "$install_dir/claude/"
+/bin/cp "$repo_dir/opencode/"*.ts "$install_dir/opencode/"
+/bin/cp "$repo_dir/pi/"*.ts "$install_dir/pi/"
 
 bun install --cwd "$install_dir" --production --frozen-lockfile
 
@@ -41,6 +44,14 @@ test -f "$install_dir/tui/index.ts" || {
 }
 test -f "$install_dir/claude/app-server.ts" || {
   printf '%s\n' "rudder install: installed Claude adapter entry is missing" >&2
+  exit 1
+}
+test -f "$install_dir/opencode/app-server.ts" || {
+  printf '%s\n' "rudder install: installed OpenCode adapter entry is missing" >&2
+  exit 1
+}
+test -f "$install_dir/pi/app-server.ts" || {
+  printf '%s\n' "rudder install: installed Pi adapter entry is missing" >&2
   exit 1
 }
 

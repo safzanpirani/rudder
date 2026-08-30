@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from "node:path";
 
 export interface RunState {
   version: number;
-  provider?: "codex" | "claude";
+  provider?: "codex" | "claude" | "opencode" | "pi";
   pid: number;
   childPid?: number;
   status: string;
@@ -1042,7 +1042,8 @@ export const FALLBACK_MODELS: ModelInfo[] = [
   { provider: "claude", id: "claude-opus-5", label: "Claude Opus 5", default: true, available: true },
   { provider: "claude", id: "claude-sonnet-5", label: "Claude Sonnet 5", available: true },
   { provider: "claude", id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5", available: true },
-  { provider: "opencode", available: false, note: "coming soon" },
+  { provider: "opencode", id: "openrouter/deepseek/deepseek-v4-flash-vision-exp", label: "DeepSeek V4 Flash Vision Exp", default: true, available: true },
+  { provider: "pi", id: "openrouter/deepseek/deepseek-v4-flash-vision-exp", label: "DeepSeek V4 Flash Vision Exp", efforts: ["off", "minimal", "low", "medium", "high", "xhigh", "max"], default: true, available: true },
 ];
 
 export interface ModelPickerOption {
@@ -1118,7 +1119,7 @@ export function newSessionRunArguments(options: NewSessionOptions): string[] {
 }
 
 export interface DejaHit {
-  provider: "codex" | "claude";
+  provider: "codex" | "claude" | "opencode" | "pi";
   sessionId: string;
   project: string;
   date: string;

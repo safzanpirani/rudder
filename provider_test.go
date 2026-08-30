@@ -112,3 +112,56 @@ func TestConfigureProviderDefaultsClaudePathEnvironment(t *testing.T) {
 		t.Fatalf("--claude-path should win over the environment, got %q", explicit.ClaudePath)
 	}
 }
+
+func TestConfigureProviderDefaultsFindsOpenCodeAndPiAdapters(t *testing.T) {
+	for _, test := range []struct {
+		provider         string
+		entryEnvironment string
+		providerPath     string
+		setPath          func(*runConfig, string)
+	}{
+		{providerOpenCode, opencodeAdapterEntryEnvironment, "/opt/opencode2", func(cfg *runConfig, path string) { cfg.OpenCodePath = path }},
+		{providerPi, piAdapterEntryEnvironment, "/opt/pi", func(cfg *runConfig, path string) { cfg.PiPath = path }},
+	} {
+		t.Run(test.provider, func(t *testing.T) {
+			entry := filepath.Join(t.TempDir(), "app-server.ts")
+			if err := os.WriteFile(entry, []byte("export {};\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(test.entryEnvironment, entry)
+			cfg := runConfig{Provider: test.provider}
+			test.setPath(&cfg, test.providerPath)
+			if err := configureProviderDefaults(&cfg, nil); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Model != "openrouter/deepseek/deepseek-v4-flash-vision-exp" {
+				t.Fatalf("default model = %q", cfg.Model)
+			}
+			if cfg.ProviderPath != test.providerPath {
+				t.Fatalf("provider path = %q", cfg.ProviderPath)
+			}
+			if len(cfg.ChildCommand) != 3 || cfg.ChildCommand[2] != entry {
+				t.Fatalf("unexpected child command: %#v", cfg.ChildCommand)
+			}
+		})
+	}
+}
+
+func TestFindAdapterEntryDoesNotExecuteWorkspaceAdapter(t *testing.T) {
+	workspace := t.TempDir()
+	entry := filepath.Join(workspace, "opencode", "app-server.ts")
+	if err := os.MkdirAll(filepath.Dir(entry), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(entry, []byte("throw new Error('workspace adapter');\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(workspace)
+	t.Setenv(opencodeAdapterEntryEnvironment, "")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	resolved, err := findAdapterEntry(opencodeAdapterEntryEnvironment, "opencode", "app-server.ts")
+	if err == nil || resolved != "" {
+		t.Fatalf("workspace adapter resolved as %q with error %v", resolved, err)
+	}
+}

@@ -34,6 +34,9 @@ type runConfig struct {
 	Sandbox           string
 	ApprovalPolicy    string
 	ClaudePath        string
+	OpenCodePath      string
+	PiPath            string
+	ProviderPath      string
 	Ephemeral         bool
 	ResumeThreadID    string
 	ForkThreadID      string
@@ -197,12 +200,12 @@ func validateRunConfig(cfg *runConfig) error {
 	if cfg.Provider == providerCodex && cfg.Model == "" {
 		return errors.New("model is required")
 	}
-	if cfg.Provider == providerClaude {
+	if cfg.Provider != providerCodex {
 		if cfg.ApprovalPolicy != "never" {
-			return errors.New("Claude runs require --approval-policy never because Rudder has no interactive approval surface")
+			return fmt.Errorf("%s runs require --approval-policy never because Rudder has no interactive approval surface", cfg.Provider)
 		}
 		if cfg.ForkThreadID != "" || cfg.ForkBeforeTurnID != "" || cfg.ForkThroughTurnID != "" {
-			return errors.New("Claude runs do not yet support --fork-thread or fork turn selectors; use --resume-thread")
+			return fmt.Errorf("%s runs do not yet support --fork-thread or fork turn selectors; use --resume-thread", cfg.Provider)
 		}
 	}
 	if cfg.Idle && cfg.Ephemeral && cfg.Provider == providerClaude {
@@ -594,6 +597,9 @@ func (r *controller) acquireThread() (string, string, error) {
 		if r.cfg.ClaudePath != "" {
 			baseParams["claudePath"] = r.cfg.ClaudePath
 		}
+	}
+	if r.cfg.ProviderPath != "" {
+		baseParams["providerPath"] = r.cfg.ProviderPath
 	}
 	method := "thread/start"
 	mode := "started"

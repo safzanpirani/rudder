@@ -2,12 +2,12 @@
 
 **A control plane for agents that run other agents.**
 
-Rudder is a small CLI that keeps a live handle on long-running Codex and Claude
-Code sessions. An orchestrating agent launches a turn in the background, reads
-its progress from plain files, and redirects it mid-flight over a local socket —
-no waiting for it to finish, no killing it and starting over. Every command
-works the same from a human shell, so a person can watch or steer too, but the
-primary operator is another agent.
+Rudder is a small CLI that keeps a live handle on long-running Codex, Claude
+Code, OpenCode 2, and Pi sessions. An orchestrating agent launches a turn in
+the background, reads its progress from plain files, and redirects it mid-flight
+over a local socket — no waiting for it to finish, no killing it and starting
+over. Every command works the same from a human shell, so a person can watch or
+steer too, but the primary operator is another agent.
 
 ![rudder TUI dashboard](demo/tui-dashboard.png)
 
@@ -51,12 +51,15 @@ Providers:
   Agent SDK. Its persistent streaming-input queue makes steering part of the
   same live session, and structured SDK events expose summarized reasoning,
   assistant updates, and tool lifecycle to the same TUI used for Codex.
+- **OpenCode 2** — Rudder runs a private v2 server and uses its durable session
+  inbox. Steering uses `delivery: "steer"` on the active session.
+- **Pi** — Rudder runs Pi in JSONL RPC mode. Pi exposes native steering,
+  interruption, session persistence, streamed tool events, and usage totals.
 
-Both providers land in the same state directory, the same commands, and the
-same TUI.
+All providers use the same state directory, commands, and TUI.
 
 ```text
-task launcher ──stdio JSON-RPC──> Codex app-server or Claude SDK adapter
+task launcher ──stdio JSON-RPC──> provider app-server or adapter
       │
       ├── state.json / events.jsonl / trace.log / output.md
       │
@@ -68,14 +71,9 @@ provider. It changes the heading of an in-flight turn.
 
 ## Status
 
-Early working prototype. The Codex app-server protocol and Claude Agent SDK
-both evolve quickly, so Rudder should be reverified after provider upgrades.
-
-### Planned
-
-- **opencode support** — a provider adapter over its server/session API, so
-  opencode sessions steer through the same commands and TUI.
-- **Pi support** — a provider adapter for Pi, same control plane.
+Early working prototype. Each provider protocol evolves quickly. Reverify
+Rudder after provider upgrades. OpenCode support targets the 2.0 preview CLI
+through `opencode2` or `opencode-next`. Rudder does not support OpenCode 1 yet.
 
 Adding a provider means implementing one adapter behind the existing
 `--provider` flag. The state directory, control socket, steering commands, and
@@ -91,7 +89,11 @@ go build -o rudder .
 Requires Go 1.24 and Bun 1.4 or newer. Codex runs require a CLI with
 `codex app-server` and `turn/steer` support; that command surface is verified
 against `codex-cli 0.145.0`. Claude runs use the pinned official Claude Agent
-SDK and the caller's normal Claude Code authentication.
+SDK and the caller's normal Claude Code authentication. OpenCode runs require
+the `opencode2` or `opencode-next` executable.
+
+Pi runs require the `pi` executable with RPC mode. The adapters inherit each
+CLI's normal authentication environment.
 
 ## Run a task
 
@@ -136,6 +138,30 @@ sandbox, adds the working directory to the writable paths, and fails if the
 sandbox is unavailable. `danger-full-access` maps to `bypassPermissions`.
 Rudder denies any operation that still requires interactive approval.
 
+Run OpenCode 2 or Pi through the same surface:
+
+```bash
+./rudder run --provider opencode --cwd "$PWD" \
+  --prompt-file .scratch/rudder-demo/prompt.md \
+  --state-dir .scratch/rudder-demo/opencode.run
+
+./rudder run --provider pi --cwd "$PWD" \
+  --prompt-file .scratch/rudder-demo/prompt.md \
+  --state-dir .scratch/rudder-demo/pi.run
+```
+
+The default model for both adapters is
+`openrouter/deepseek/deepseek-v4-flash-vision-exp`. Use `--opencode-path` or
+`RUDDER_OPENCODE_PATH` to select an OpenCode 2 executable. Use `--pi-path` or
+`RUDDER_PI_PATH` to select a Pi executable. OpenCode installs private
+Rudder-scoped agents with explicit permission rules for each sandbox value. Pi
+disables extensions and enables only its read, grep, find, and list tools for
+`read-only`. Both adapters use their provider's native permission system. They
+do not provide Rudder-enforced filesystem containment for `workspace-write`.
+Run these adapters only in trusted workspaces. OpenCode 2 loads project
+configuration and plugins, and Pi loads project-local resources after approval.
+Those resources can execute code outside the adapters' tool permission rules.
+
 Run it in the background from an agent harness so the harness can continue
 reading user messages and issue steering commands.
 
@@ -144,7 +170,7 @@ child process group. Set it to `0` only when an unbounded run is intentional.
 `SIGINT` and `SIGTERM` mark the run interrupted, terminate the app-server
 process group, and remove the control socket before Rudder exits.
 
-Resume an existing Codex thread or Claude session for another steerable turn:
+Resume an existing provider thread or session for another steerable turn:
 
 ```bash
 ./rudder run \
@@ -288,8 +314,8 @@ finished session continues its thread in a fresh run. The prompt metadata shows
 the selected session's model, token usage, cost, and status. For example, it
 can show `gpt-5.6-sol · 186.1K (24%) · idle`.
 
-`n` starts a brand-new session: pick a provider/model in the T3-style picker
-(opencode appears greyed out until its adapter exists), type the first prompt,
+`n` starts a brand-new session. Pick a provider and model in the T3-style
+picker, type the first prompt,
 and the TUI spawns a detached `rudder run --idle` in the current directory.
 `m` opens the same picker to override the model for continuations. When the
 `deja` CLI is installed, `f` searches past Claude/Codex transcripts and resumes
@@ -328,7 +354,8 @@ dependency. The installer places the binary in `~/.local/bin` and the TUI in
 `~/.local/share/rudder` by default; both locations honor the standard
 `RUDDER_BIN_DIR` and `XDG_DATA_HOME` overrides. The launcher also finds a TUI
 beside the binary or in the current checkout. For custom development paths, set
-`RUDDER_TUI_ENTRY` and `RUDDER_CLAUDE_ADAPTER_ENTRY`. Legacy
+`RUDDER_TUI_ENTRY`, `RUDDER_CLAUDE_ADAPTER_ENTRY`,
+`RUDDER_OPENCODE_ADAPTER_ENTRY`, or `RUDDER_PI_ADAPTER_ENTRY`. Legacy
 `CODEX_RUDDER_*` variables and installed assets remain readable.
 
 Run artifacts:
@@ -426,11 +453,11 @@ Rudder currently depends on:
 - `turn/interrupt`
 - `turn/started`, `item/*`, and `turn/completed` notifications
 
-The Claude adapter implements only the corresponding lifecycle subset needed by
-`rudder run`, `steer`, and `interrupt`; it is not a general Codex app-server.
-Only Claude sessions launched by Rudder are live-observable and steerable.
-Claude reasoning in the TUI is the provider's summarized thinking stream, not
-hidden raw chain of thought.
+The Claude, OpenCode 2, and Pi adapters implement the lifecycle subset needed
+by `rudder run`, `steer`, `prompt`, and `interrupt`. They do not implement the
+general Codex app-server surface. Sessions launched by another process do not
+become live-observable through Rudder. Each adapter forwards summarized or
+provider-exposed reasoning. Rudder does not expose hidden raw chain of thought.
 
 ## Agent setup guide
 
@@ -441,8 +468,9 @@ sessions, not just build a binary.
 
 ````text
 Set up Rudder (https://github.com/safzanpirani/rudder) on this machine, verify
-it works, and learn how to operate it. Rudder is a CLI that runs Codex or
-Claude Code as an observable, steerable child process: it writes every event to
+it works, and learn how to operate it. Rudder runs Codex, Claude Code,
+OpenCode 2, or Pi as an observable, steerable child process. It writes every
+event to
 disk and exposes a control socket so you can redirect or stop a turn while it
 runs. Follow Part 1 in order and stop at the first failure; keep Part 2 as your
 operating manual.
@@ -452,7 +480,8 @@ PART 1 — INSTALL AND VERIFY
 1. Check prerequisites. Report the version of each and stop if any is missing:
    - Go 1.24 or newer  (`go version`)
    - Bun 1.4 or newer  (`bun --version`)
-   - At least one provider CLI: `codex --version`, or `claude --version`.
+   - At least one provider CLI: `codex --version`, `claude --version`,
+     `opencode2 --version`, or `pi --version`.
 
 2. Clone the repo somewhere sensible and build it:
    git clone https://github.com/safzanpirani/rudder
@@ -502,7 +531,7 @@ Trust output.md only when `rudder status --json` says "completed"; on
 be fresh per run. Prompts always come from --prompt-file, never argv.
 
 Starting runs. Useful `rudder run` flags:
-   --provider codex|claude      default codex
+   --provider codex|claude|opencode|pi   default codex
    --model / --effort           `rudder models --json` lists valid combos
    --sandbox                    read-only | workspace-write (default) |
                                 danger-full-access
@@ -556,7 +585,7 @@ Ground rules:
 
 [`skills/rudder-delegate`](skills/rudder-delegate/SKILL.md) is an installable
 agent skill that teaches a coding agent to hand a hard or long task to a
-steerable Codex or Claude sub-agent through Rudder: build a self-contained
+steerable provider through Rudder: build a self-contained
 brief, launch in the background, monitor, steer mid-turn, wait bounded, and
 verify the handoff. Install it by copying the directory into your agent's
 skills location (for Claude Code, `~/.claude/skills/` or the project's

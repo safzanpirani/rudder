@@ -80,15 +80,17 @@ func runCommandContext(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	cwd, _ := os.Getwd()
 	var cfg runConfig
-	fs.StringVar(&cfg.Provider, "provider", providerCodex, "provider: codex or claude")
+	fs.StringVar(&cfg.Provider, "provider", providerCodex, "provider: codex, claude, opencode, or pi")
 	fs.StringVar(&cfg.CWD, "cwd", cwd, "working directory for the provider session")
 	fs.StringVar(&cfg.PromptFile, "prompt-file", "", "file containing the initial task")
 	fs.StringVar(&cfg.StateDir, "state-dir", "", "directory for state, trace, and output")
 	fs.StringVar(&cfg.Model, "model", "", "provider model; Codex defaults to gpt-5.6-sol")
 	fs.StringVar(&cfg.Effort, "effort", "", "reasoning effort override")
 	fs.StringVar(&cfg.Sandbox, "sandbox", "workspace-write", "read-only, workspace-write, or danger-full-access")
-	fs.StringVar(&cfg.ApprovalPolicy, "approval-policy", "never", "Codex approval policy; Claude requires never")
+	fs.StringVar(&cfg.ApprovalPolicy, "approval-policy", "never", "Codex approval policy; adapters require never")
 	fs.StringVar(&cfg.ClaudePath, "claude-path", "", "Claude Code executable for --provider claude")
+	fs.StringVar(&cfg.OpenCodePath, "opencode-path", "", "OpenCode 2 executable for --provider opencode")
+	fs.StringVar(&cfg.PiPath, "pi-path", "", "Pi executable for --provider pi")
 	fs.BoolVar(&cfg.Ephemeral, "ephemeral", false, "do not persist the provider session")
 	fs.StringVar(&cfg.ResumeThreadID, "resume-thread", "", "resume this provider thread/session before starting the turn")
 	fs.StringVar(&cfg.ForkThreadID, "fork-thread", "", "fork this thread before starting the turn")
@@ -346,10 +348,10 @@ func waitCommand(args []string) error {
 
 func printUsage() {
 	name := filepath.Base(os.Args[0])
-	fmt.Fprintf(os.Stderr, `Rudder - live steering for Codex and Claude Code
+	fmt.Fprintf(os.Stderr, `Rudder - live steering for coding agents
 
 Usage:
-  %[1]s run [--provider codex|claude] --prompt-file FILE --state-dir DIR [options]
+  %[1]s run [--provider codex|claude|opencode|pi] --prompt-file FILE --state-dir DIR [options]
          [-- APP_SERVER_COMMAND...]
   %[1]s thread list|search|read|turns|fork|name|archive|unarchive [options]
   %[1]s tui [--root DIR] [--state-dir DIR] [--all] [--theme NAME]

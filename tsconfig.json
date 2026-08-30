@@ -8,5 +8,11 @@
     "noEmit": true,
     "types": ["bun"]
   },
-  "include": ["tui/**/*.ts", "claude/**/*.ts"]
+  "include": [
+    "adapter/**/*.ts",
+    "claude/**/*.ts",
+    "opencode/**/*.ts",
+    "pi/**/*.ts",
+    "tui/**/*.ts"
+  ]
 }

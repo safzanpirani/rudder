@@ -701,13 +701,15 @@ describe("promptable TUI helpers", () => {
     expect(shown).toHaveLength(1);
   });
 
-  test("builds picker options with a disabled opencode slot", () => {
+  test("builds picker options for OpenCode and Pi", () => {
     const options = modelPickerOptions(FALLBACK_MODELS);
     expect(options[0].value).toBe("codex/gpt-5.6-sol");
     expect(options[0].name).toContain("*");
     const opencode = options.find((option) => option.model.provider === "opencode");
-    expect(opencode?.disabled).toBe(true);
-    expect(opencode?.name).toContain("coming soon");
+    const pi = options.find((option) => option.model.provider === "pi");
+    expect(opencode?.disabled).toBe(false);
+    expect(pi?.disabled).toBe(false);
+    expect(pi?.model.efforts).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
   });
 
   test("falls back to the embedded catalog on bad JSON", () => {
