@@ -90,6 +90,17 @@ export function nextArtifact(artifact: Artifact): Artifact {
   return artifact === "chat" ? "trace" : artifact === "trace" ? "output" : "chat";
 }
 export type Focus = "sessions" | "artifact" | "steer";
+export type TUILayout = "classic" | "beta";
+
+export interface TUIArguments {
+  rudder: string;
+  roots: string[];
+  stateDirs: string[];
+  interval: number;
+  includeAll: boolean;
+  theme?: string;
+  beta: boolean;
+}
 
 export interface ViewState {
   selectedStateDir?: string;
@@ -113,6 +124,130 @@ export const initialViewState: ViewState = {
   focus: "sessions",
   interruptArmedUntil: 0,
 };
+
+export function parseArguments(
+  argv: string[],
+  environment: Record<string, string | undefined> = process.env,
+): TUIArguments {
+  const roots: string[] = [];
+  const stateDirs: string[] = [];
+  let rudder = "";
+  let interval = 500;
+  let includeAll = false;
+  let theme: string | undefined;
+  let beta = environment.RUDDER_TUI_BETA === "1";
+  for (let index = 0; index < argv.length; index++) {
+    const argument = argv[index];
+    const value = argv[index + 1];
+    if (
+      (argument === "--rudder" ||
+        argument === "--root" ||
+        argument === "--state-dir" ||
+        argument === "--interval" ||
+        argument === "--theme") &&
+      !value
+    )
+      throw new Error(`${argument} requires a value`);
+    if (argument === "--rudder") {
+      rudder = value;
+      index++;
+    } else if (argument === "--root") {
+      roots.push(value);
+      index++;
+    } else if (argument === "--state-dir") {
+      stateDirs.push(value);
+      index++;
+    } else if (argument === "--interval") {
+      interval = parseInterval(value);
+      index++;
+    } else if (argument === "--theme") {
+      theme = value;
+      index++;
+    } else if (argument === "--all") includeAll = true;
+    else if (argument === "--beta") beta = true;
+    else throw new Error(`unknown TUI argument ${argument}`);
+  }
+  if (!rudder)
+    throw new Error("--rudder is required (launch the TUI through rudder tui)");
+  if (roots.length === 0 && stateDirs.length === 0)
+    roots.push(join(process.cwd(), ".scratch"));
+  return { rudder, roots, stateDirs, interval, includeAll, theme, beta };
+}
+
+function parseInterval(value: string): number {
+  const match = /^(\d+)(ms|s)$/.exec(value);
+  if (!match)
+    throw new Error(
+      "--interval must use milliseconds or seconds, for example 500ms or 2s",
+    );
+  const amount = Number(match[1]);
+  const milliseconds = match[2] === "s" ? amount * 1_000 : amount;
+  if (milliseconds < 100) throw new Error("--interval must be at least 100ms");
+  return milliseconds;
+}
+
+export type DashboardNavigation =
+  | "show-sessions"
+  | "focus-sessions"
+  | "focus-artifact";
+
+export function dashboardNavigation(
+  layout: TUILayout,
+  focus: Focus,
+  key: string,
+): DashboardNavigation | undefined {
+  if (key === "tab") {
+    if (layout === "beta") return "show-sessions";
+    return focus === "sessions" ? "focus-artifact" : "focus-sessions";
+  }
+  if (layout === "classic" && key === "escape" && focus === "sessions")
+    return "focus-artifact";
+  return undefined;
+}
+
+export function sessionsPanelTitle(options: {
+  layout: TUILayout;
+  liveCount: number;
+  recentCount: number;
+  query?: string;
+}): string {
+  const filterSuffix =
+    options.layout === "beta" && options.query ? ` · /${options.query}` : "";
+  const actions =
+    options.layout === "beta" ? " · Enter open · Esc close" : "";
+  return ` sessions · ${options.liveCount} live · ${options.recentCount} recent${filterSuffix}${actions} `;
+}
+
+export function emptyPromptHint(layout: TUILayout): string {
+  return layout === "classic"
+    ? "n new session · Tab focus"
+    : "n new session · Tab sessions";
+}
+
+export function contextualHelp(options: {
+  layout: TUILayout;
+  focus: Focus;
+  session?: Pick<Session, "status">;
+  hasQuery: boolean;
+  dejaAvailable?: boolean;
+  compact?: boolean;
+}): string {
+  if (options.focus === "sessions") {
+    return options.layout === "classic"
+      ? "j/k select · / filter · Tab chat · Esc chat"
+      : "j/k select · / filter · Enter open · Esc close";
+  }
+  const matches = options.hasQuery ? " · n/N matches" : "";
+  const stoppable =
+    options.session?.status === "active" || options.session?.status === "idle";
+  const tab = options.layout === "classic" ? "Tab focus" : "Tab sessions";
+  const stop = stoppable ? " · x x" : "";
+  if (options.compact)
+    return `s prompt · n new · o tabs${matches}${stop} · ${tab} · q quit`;
+  const find = options.dejaAvailable ? " · f find" : "";
+  const action = stoppable ? " · x x stop" : "";
+  return `s prompt · n new · m model${find}${matches}${action} · ${tab} · q quit`;
+}
 
 export class AsyncTaskGate {
   private active?: Promise<void>;

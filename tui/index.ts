@@ -24,7 +24,10 @@ import {
   attachToolDetails,
   compactSessionDetails,
   continuationRunArguments,
+  contextualHelp,
+  dashboardNavigation,
   discoverSessions,
+  emptyPromptHint,
   filterSessions,
   formatTokenUsage,
   initialViewState,
@@ -32,6 +35,7 @@ import {
   modelPickerOptions,
   newSessionRunArguments,
   nextArtifact,
+  parseArguments,
   parseChatTranscript,
   parseDejaHits,
   parseModelCatalog,
@@ -43,6 +47,7 @@ import {
   sessionDescription,
   sessionDetails,
   sessionLabel,
+  sessionsPanelTitle,
   statusGlyph,
   visibleArtifactTail,
   visibleSessions,
@@ -54,6 +59,7 @@ import {
   type Session,
   type ToolEventDetail,
   type TraceActivity,
+  type TUILayout,
   type ViewState,
 } from "./core";
 import {
@@ -73,15 +79,6 @@ const OUTPUT_HISTORY_LINES = 1_000;
 const ARTIFACT_TAIL_BYTES = 1024 * 1024;
 const TOOL_OUTPUT_LINES = 40;
 
-interface Arguments {
-  rudder: string;
-  roots: string[];
-  stateDirs: string[];
-  interval: number;
-  includeAll: boolean;
-  theme?: string;
-}
-
 interface ActivityRow {
   id: string;
   activity?: TraceActivity;
@@ -98,6 +95,7 @@ type SearchMode = "sessions" | "artifact" | "deja";
 
 async function main(): Promise<void> {
   const args = parseArguments(Bun.argv.slice(2));
+  const layout: TUILayout = args.beta ? "beta" : "classic";
   let activeThemeName = resolveThemeName(
     args.theme || process.env.RUDDER_TUI_THEME,
     await readPersistedTheme(),
@@ -161,7 +159,7 @@ async function main(): Promise<void> {
       textColor: palette.text,
       focusedTextColor: palette.text,
       descriptionColor: palette.dim,
-      selectedDescriptionColor: palette.dim,
+      selectedDescriptionColor: palette.text,
       selectedBackgroundColor: palette.selected,
       selectedTextColor: palette.accent,
       showScrollIndicator: true,
@@ -221,20 +219,27 @@ async function main(): Promise<void> {
       },
     });
     const sessionsPanel = new BoxRenderable(renderer, {
-      position: "absolute",
-      left: "8%",
-      top: "8%",
-      width: "84%",
-      height: "84%",
-      zIndex: 15,
+      position: layout === "beta" ? "absolute" : "relative",
+      left: layout === "beta" ? "8%" : undefined,
+      top: layout === "beta" ? "8%" : undefined,
+      width: layout === "beta" ? "84%" : "34%",
+      minWidth: layout === "classic" ? 36 : undefined,
+      maxWidth: layout === "classic" ? 44 : undefined,
+      height: layout === "beta" ? "84%" : "100%",
+      flexShrink: 0,
+      zIndex: layout === "beta" ? 15 : 0,
       border: true,
       borderStyle: "rounded",
       borderColor: palette.border,
       focusedBorderColor: palette.accent,
-      title: " Sessions · Enter open · Esc close ",
+      title: sessionsPanelTitle({
+        layout,
+        liveCount: 0,
+        recentCount: 0,
+      }),
       padding: 1,
       backgroundColor: palette.background,
-      visible: false,
+      visible: layout === "classic",
     });
     sessionsPanel.add(sessionList);
 
@@ -251,7 +256,8 @@ async function main(): Promise<void> {
       borderColor: palette.border,
       title: " Session · i hide ",
       padding: 1,
-      visible: false,
+      backgroundColor: palette.background,
+      visible: layout === "classic",
     });
     detailsPanel.add(details);
 
@@ -321,25 +327,44 @@ async function main(): Promise<void> {
     artifactPanel.add(tabsBar);
     artifactPanel.add(artifactScroll);
 
-    const body = new BoxRenderable(renderer, {
-      width: "100%",
+    const rightColumn = new BoxRenderable(renderer, {
+      width: layout === "beta" ? "100%" : undefined,
+      minWidth: layout === "classic" ? 50 : undefined,
+      height: "100%",
       flexGrow: 1,
       flexDirection: "column",
       gap: 1,
+      backgroundColor: palette.background,
     });
-    body.add(detailsPanel);
-    body.add(artifactPanel);
+    rightColumn.add(detailsPanel);
+    rightColumn.add(artifactPanel);
+
+    const body = new BoxRenderable(renderer, {
+      width: "100%",
+      flexGrow: 1,
+      flexDirection: layout === "beta" ? "column" : "row",
+      gap: 1,
+    });
+    if (layout === "classic") body.add(sessionsPanel);
+    body.add(rightColumn);
 
     // Meta line under the input: mode + model on the left, tokens/cost right.
     const promptMetaLeft = new TextRenderable(renderer, {
       content: "",
       fg: palette.dim,
       height: 1,
+      flexGrow: 1,
+      flexShrink: 1,
+      wrapMode: "none",
+      truncate: true,
     });
     const promptMetaRight = new TextRenderable(renderer, {
       content: "",
       fg: palette.dim,
       height: 1,
+      flexShrink: 0,
+      wrapMode: "none",
+      truncate: true,
     });
     const promptMeta = new BoxRenderable(renderer, {
       width: "100%",
@@ -362,17 +387,28 @@ async function main(): Promise<void> {
       content: "",
       fg: palette.dim,
       height: 1,
+      width: "34%",
+      flexShrink: 1,
+      wrapMode: "none",
+      truncate: true,
     });
     const footerRight = new TextRenderable(renderer, {
       content: "",
       fg: palette.dim,
       height: 1,
+      width: "64%",
+      flexGrow: 1,
+      flexShrink: 1,
+      paddingLeft: 1,
+      wrapMode: "none",
+      truncate: true,
     });
     const footerBar = new BoxRenderable(renderer, {
       width: "100%",
       height: 1,
       flexDirection: "row",
-      justifyContent: "space-between",
+      justifyContent: "flex-start",
+      gap: 1,
       paddingLeft: 1,
       paddingRight: 1,
     });
@@ -548,7 +584,7 @@ async function main(): Promise<void> {
     root.add(promptMeta);
     root.add(statusLine);
     root.add(footerBar);
-    root.add(sessionsPanel);
+    if (layout === "beta") root.add(sessionsPanel);
     root.add(searchPanel);
     root.add(themePanel);
     root.add(modelPanel);
@@ -596,6 +632,7 @@ async function main(): Promise<void> {
       focusArtifact();
       setTimeout(updateFollowFromPosition, 0);
     };
+    renderer.on("resize", () => updateChrome());
     themePanel.onMouseDown = () => themePicker.focus();
 
     themePicker.on(
@@ -731,6 +768,16 @@ async function main(): Promise<void> {
         return;
       }
 
+      const navigation = dashboardNavigation(layout, view.focus, key.name);
+      if (navigation) {
+        key.preventDefault();
+        key.stopPropagation();
+        if (navigation === "show-sessions") showSessions();
+        else if (navigation === "focus-sessions") focusSessions();
+        else focusArtifact();
+        return;
+      }
+
       const handled =
         [
           "q",
@@ -762,7 +809,6 @@ async function main(): Promise<void> {
       if (key.name === "t") openThemePicker();
       else if (key.name === "r" && key.shift) openPrompt("continue");
       else if (key.name === "r") void refresh("Refreshing sessions…");
-      else if (key.name === "tab") showSessions();
       else if (key.name === "o") setArtifact(nextArtifactView());
       else if (key.name === "s") openPrompt("auto");
       else if (key.name === "n" && !key.shift) {
@@ -846,6 +892,8 @@ async function main(): Promise<void> {
       palette = theme.palette;
       renderer.setBackgroundColor(palette.background);
       root.backgroundColor = palette.background;
+      rightColumn.backgroundColor = palette.background;
+      artifactPanel.backgroundColor = palette.background;
       sessionList.backgroundColor = palette.panel;
       sessionList.focusedBackgroundColor = palette.panel;
       sessionList.textColor = palette.text;
@@ -858,6 +906,7 @@ async function main(): Promise<void> {
       sessionsPanel.focusedBorderColor = palette.accent;
       sessionsPanel.titleColor = palette.accent;
       details.fg = palette.text;
+      detailsPanel.backgroundColor = palette.background;
       detailsPanel.borderColor = palette.border;
       detailsPanel.titleColor = palette.accent;
       artifactScroll.verticalScrollbarOptions = {
@@ -920,7 +969,11 @@ async function main(): Promise<void> {
     }
 
     function focusCurrentPanel(): void {
-      if (view.focus === "sessions" && sessionsVisible) sessionList.focus();
+      if (
+        view.focus === "sessions" &&
+        (layout === "classic" || sessionsVisible)
+      )
+        sessionList.focus();
       else {
         view = { ...view, focus: "artifact" };
         artifactScroll.focus();
@@ -1227,7 +1280,7 @@ async function main(): Promise<void> {
           ? promptMode
           : promptModeForSession(session);
       if (!session || !route) {
-        promptMetaLeft.content = "n new session · Tab sessions";
+        promptMetaLeft.content = emptyPromptHint(layout);
         promptInput.placeholder = "Ask anything — n starts a new session";
         return;
       }
@@ -1515,8 +1568,12 @@ async function main(): Promise<void> {
       }
       const liveCount = sessions.filter(isLive).length;
       const historyCount = sessions.length - liveCount;
-      const filterSuffix = sessionQuery ? ` · /${sessionQuery}` : "";
-      sessionsPanel.title = ` sessions · ${liveCount} live · ${historyCount} recent${filterSuffix} · Enter open · Esc close `;
+      sessionsPanel.title = sessionsPanelTitle({
+        layout,
+        liveCount,
+        recentCount: historyCount,
+        query: sessionQuery,
+      });
       updateDetails();
       updateChrome();
     }
@@ -1861,12 +1918,14 @@ async function main(): Promise<void> {
       sessionsPanel.borderColor =
         view.focus === "sessions" ? palette.accent : palette.border;
       footerLeft.content = sessionLocationSummary(session);
-      footerRight.content = contextualHelp(
-        view.focus,
+      footerRight.content = ` ${contextualHelp({
+        layout,
+        focus: view.focus,
         session,
-        Boolean(query),
+        hasQuery: Boolean(query),
         dejaAvailable,
-      );
+        compact: renderer.width < 120,
+      })}`;
       updatePromptChrome();
     }
 
@@ -2128,22 +2187,6 @@ function activityCopyText(
     .join("\n");
 }
 
-function contextualHelp(
-  focus: ViewState["focus"],
-  session: Session | undefined,
-  hasQuery: boolean,
-  dejaAvailable = false,
-): string {
-  const find = dejaAvailable ? " · f find" : "";
-  if (focus === "sessions")
-    return "j/k select · / filter · Enter open · Esc close";
-  const action =
-    session?.status === "active" || session?.status === "idle"
-      ? " · x x stop"
-      : "";
-  return `s prompt · n new · m model${find}${action} · Tab sessions · q quit`;
-}
-
 function isLive(session: Session): boolean {
   return (
     session.status === "active" ||
@@ -2155,62 +2198,6 @@ function isLive(session: Session): boolean {
 function formatDuration(milliseconds: number): string {
   if (milliseconds < 1_000) return `${milliseconds}ms`;
   return `${(milliseconds / 1_000).toFixed(milliseconds < 10_000 ? 1 : 0)}s`;
-}
-
-function parseArguments(argv: string[]): Arguments {
-  const roots: string[] = [];
-  const stateDirs: string[] = [];
-  let rudder = "";
-  let interval = 500;
-  let includeAll = false;
-  let theme: string | undefined;
-  for (let index = 0; index < argv.length; index++) {
-    const argument = argv[index];
-    const value = argv[index + 1];
-    if (
-      (argument === "--rudder" ||
-        argument === "--root" ||
-        argument === "--state-dir" ||
-        argument === "--interval" ||
-        argument === "--theme") &&
-      !value
-    )
-      throw new Error(`${argument} requires a value`);
-    if (argument === "--rudder") {
-      rudder = value;
-      index++;
-    } else if (argument === "--root") {
-      roots.push(value);
-      index++;
-    } else if (argument === "--state-dir") {
-      stateDirs.push(value);
-      index++;
-    } else if (argument === "--interval") {
-      interval = parseInterval(value);
-      index++;
-    } else if (argument === "--theme") {
-      theme = value;
-      index++;
-    } else if (argument === "--all") includeAll = true;
-    else throw new Error(`unknown TUI argument ${argument}`);
-  }
-  if (!rudder)
-    throw new Error("--rudder is required (launch the TUI through rudder tui)");
-  if (roots.length === 0 && stateDirs.length === 0)
-    roots.push(join(process.cwd(), ".scratch"));
-  return { rudder, roots, stateDirs, interval, includeAll, theme };
-}
-
-function parseInterval(value: string): number {
-  const match = /^(\d+)(ms|s)$/.exec(value);
-  if (!match)
-    throw new Error(
-      "--interval must use milliseconds or seconds, for example 500ms or 2s",
-    );
-  const amount = Number(match[1]);
-  const milliseconds = match[2] === "s" ? amount * 1_000 : amount;
-  if (milliseconds < 100) throw new Error("--interval must be at least 100ms");
-  return milliseconds;
 }
 
 async function runControl(rudder: string, args: string[]): Promise<string> {

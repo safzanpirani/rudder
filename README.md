@@ -247,15 +247,25 @@ arguments:
 ./rudder tui --state-dir /path/to/one/run --state-dir /path/to/another/run
 ./rudder tui --all
 ./rudder tui --theme tokyonight
+./rudder tui --beta
 ```
 
-The TUI is prompt-first: the default view is one session's conversation (the
-Chat tab, built from the run's `events.jsonl`) with a persistent input box at
-the bottom. Typing into it routes by session status — an active turn gets
-steered, an idle `--idle` session gets a new turn over the control socket, and
-a finished session continues its thread in a fresh run. The footer's right
-side shows the selected session's model, token usage, and cost, e.g.
-`gpt-5.6-sol · 186.1K (24%) · idle`.
+The default TUI uses an at-a-glance dashboard. A persistent sessions pane shows
+live and recent runs on the left. The right column shows session details, the
+lowercase Chat, Activity, and Output tabs, and the selected artifact. The
+prompt input spans the full width below the dashboard. Press `Tab` to switch
+focus between the sessions pane and the selected artifact. Press `Esc` in the
+sessions pane to return focus to the artifact.
+
+Use `--beta` for the chat-first layout. `RUDDER_TUI_BETA=1` enables the same
+layout. Beta mode shows one session's borderless conversation and keeps the
+sessions list behind a `Tab` overlay. `Enter` or `Esc` closes that overlay.
+
+Typing in the prompt input routes by session status. An active turn gets a
+steer. An idle `--idle` session gets a new turn over the control socket. A
+finished session continues its thread in a fresh run. The prompt metadata shows
+the selected session's model, token usage, cost, and status. For example, it
+can show `gpt-5.6-sol · 186.1K (24%) · idle`.
 
 `n` starts a brand-new session: pick a provider/model in the T3-style picker
 (opencode appears greyed out until its adapter exists), type the first prompt,
@@ -264,16 +274,18 @@ and the TUI spawns a detached `rudder run --idle` in the current directory.
 `deja` CLI is installed, `f` searches past Claude/Codex transcripts and resumes
 a chosen session under rudder.
 
-The session list lives behind `Tab` as an overlay; `Enter` or `Esc` closes it.
-Within it, `/` filters by project, thread, status, or model. Chat, Activity,
-and Output are clickable tabs (`o` cycles). Both panes support
+`/` filters by project, thread, status, or model when the sessions pane has
+focus. `/` searches the selected artifact when the artifact has focus. Chat,
+Activity, and Output are clickable tabs (`o` cycles). Both panes support
 mouse-wheel scrolling, `/` search with `n`/`N` match navigation, and `c` to copy
 the selected row. In Activity, clicking selects a row and clicking a tool row
 expands it; use the Output tab for normal mouse text selection. Enter also
 expands Activity tool rows to show the full command, status, duration, working
 directory, and captured output. Scrolling up
 pauses follow mode; click the follow indicator or press End to return to live
-output. Press `i` for full session metadata.
+output. Classic mode shows compact session metadata by default. Press `i` to
+cycle through expanded, hidden, and compact metadata. Beta mode starts with
+metadata hidden and uses the same cycle.
 
 Press `t` to open the theme picker. Moving through the list previews each
 palette immediately; Enter saves the choice globally and Escape restores the

@@ -7,8 +7,11 @@ import {
   AsyncTaskGate,
   attachToolDetails,
   discoverSessions,
+  emptyPromptHint,
   compactSessionDetails,
   continuationRunArguments,
+  contextualHelp,
+  dashboardNavigation,
   filterSessions,
   initialViewState,
   latestAgentUpdate,
@@ -28,6 +31,8 @@ import {
   newSessionRunArguments,
   parseDejaHits,
   parseChatTranscript,
+  parseArguments,
+  sessionsPanelTitle,
   FALLBACK_MODELS,
   type Session,
 } from "./core";
@@ -85,6 +90,76 @@ describe("view reducer", () => {
       focus: "steer",
       interruptArmedUntil: 2100,
     });
+  });
+});
+
+describe("TUI layout helpers", () => {
+  test("enables beta layout from either the flag or environment", () => {
+    expect(parseArguments(["--rudder", "/tmp/rudder"], {}).beta).toBe(false);
+    expect(
+      parseArguments(["--rudder", "/tmp/rudder", "--beta"], {}).beta,
+    ).toBe(true);
+    expect(
+      parseArguments(["--rudder", "/tmp/rudder"], {
+        RUDDER_TUI_BETA: "1",
+      }).beta,
+    ).toBe(true);
+  });
+
+  test("routes Tab and Escape according to the selected layout", () => {
+    expect(dashboardNavigation("beta", "artifact", "tab")).toBe(
+      "show-sessions",
+    );
+    expect(dashboardNavigation("classic", "artifact", "tab")).toBe(
+      "focus-sessions",
+    );
+    expect(dashboardNavigation("classic", "sessions", "tab")).toBe(
+      "focus-artifact",
+    );
+    expect(dashboardNavigation("classic", "sessions", "escape")).toBe(
+      "focus-artifact",
+    );
+  });
+
+  test("describes persistent and overlay session navigation accurately", () => {
+    expect(
+      sessionsPanelTitle({
+        layout: "classic",
+        liveCount: 2,
+        recentCount: 5,
+      }),
+    ).toBe(" sessions · 2 live · 5 recent ");
+    expect(
+      sessionsPanelTitle({
+        layout: "beta",
+        liveCount: 2,
+        recentCount: 5,
+      }),
+    ).toContain("Enter open · Esc close");
+    expect(
+      contextualHelp({
+        layout: "classic",
+        focus: "sessions",
+        hasQuery: false,
+      }),
+    ).toContain("Tab chat");
+    expect(
+      contextualHelp({
+        layout: "beta",
+        focus: "artifact",
+        hasQuery: false,
+        dejaAvailable: true,
+      }),
+    ).toContain("m model · f find");
+    expect(
+      contextualHelp({
+        layout: "beta",
+        focus: "artifact",
+        hasQuery: false,
+        compact: true,
+      }),
+    ).toContain("o tabs");
+    expect(emptyPromptHint("classic")).toBe("n new session · Tab focus");
   });
 });
 
