@@ -1,10 +1,13 @@
 # Rudder
 
-**Change your mind while the agent is still working.**
+**A control plane for agents that run other agents.**
 
 Rudder is a small CLI that keeps a live handle on long-running Codex and Claude
-Code sessions. Watch a turn as it runs, and redirect it mid-flight — no waiting
-for it to finish, no killing it and starting over.
+Code sessions. An orchestrating agent launches a turn in the background, reads
+its progress from plain files, and redirects it mid-flight over a local socket —
+no waiting for it to finish, no killing it and starting over. Every command
+works the same from a human shell, so a person can watch or steer too, but the
+primary operator is another agent.
 
 ![rudder TUI dashboard](demo/tui-dashboard.png)
 
@@ -17,12 +20,30 @@ rudder tui                                           # every session, live
 
 ## Why?
 
-`codex exec --json` is observable but its stdin is already closed after the
-initial prompt. Once a turn is running, your only options are to wait or to
-kill it. Both waste the work already done.
+Agent harnesses increasingly delegate: one agent plans, spawns a coding agent
+for the long turn, and keeps working while it runs. `codex exec --json` breaks
+that loop — it is observable, but its stdin closes after the initial prompt, so
+the orchestrator can only wait for the turn or kill it. Both waste the work
+already done, and mid-flight discoveries (a wrong assumption, new user input, a
+better plan) cannot reach the running turn.
 
 Rudder instead owns the provider connection and exposes a small local control
-socket, so a second command can steer the turn that is already in flight.
+socket, so any later command — issued by the orchestrating agent, a cron job,
+or a human — can steer the turn that is already in flight.
+
+Agent-first by construction:
+
+- **State is plain files** (`state.json`, `events.jsonl`, `output.md`) — an
+  orchestrator polls or tails them without a TTY.
+- **Commands speak JSON** where metadata matters (`rudder thread ...`), so
+  skills and scripts consume results without scraping.
+- **Steering is just another CLI call** against the socket, safe to issue from
+  a background task; it fails loudly if the turn is gone rather than starting a
+  replacement.
+- The TUI and human steering sit on top of the same contract, as the optional
+  layer.
+
+Providers:
 
 - **Codex** — Rudder owns a `codex app-server` connection and calls `turn/steer`
   on the running turn.
