@@ -411,19 +411,27 @@ Only Claude sessions launched by Rudder are live-observable and steerable.
 Claude reasoning in the TUI is the provider's summarized thinking stream, not
 hidden raw chain of thought.
 
-## Install with a coding agent
+## Agent setup guide
 
 Hand this to Claude Code, Codex, Cursor, or any agent with shell access. It is
-written to be pasted verbatim.
+written to be pasted verbatim, and it covers both installing Rudder and
+operating it afterwards, so the agent ends up able to run and steer provider
+sessions, not just build a binary.
 
 ````text
-Install Rudder (https://github.com/safzanpirani/rudder) on this machine and
-verify it works. Follow these steps in order and stop at the first failure.
+Set up Rudder (https://github.com/safzanpirani/rudder) on this machine, verify
+it works, and learn how to operate it. Rudder is a CLI that runs Codex or
+Claude Code as an observable, steerable child process: it writes every event to
+disk and exposes a control socket so you can redirect or stop a turn while it
+runs. Follow Part 1 in order and stop at the first failure; keep Part 2 as your
+operating manual.
+
+PART 1 — INSTALL AND VERIFY
 
 1. Check prerequisites. Report the version of each and stop if any is missing:
    - Go 1.24 or newer  (`go version`)
    - Bun 1.4 or newer  (`bun --version`)
-   - At least one provider: `codex --version`, or `claude --version`.
+   - At least one provider CLI: `codex --version`, or `claude --version`.
 
 2. Clone the repo somewhere sensible and build it:
    git clone https://github.com/safzanpirani/rudder
@@ -447,6 +455,8 @@ verify it works. Follow these steps in order and stop at the first failure.
      --prompt-file /tmp/rudder-smoke/prompt.md \
      --state-dir /tmp/rudder-smoke/run --sandbox read-only
    rudder peek --state-dir /tmp/rudder-smoke/run
+   Confirm `rudder status --state-dir /tmp/rudder-smoke/run --json` reports
+   "completed" and that output.md contains SMOKE_OK.
 
 6. If you are setting up the Claude provider and it reports an authentication
    failure, the cause is almost always that the resolved `claude` executable
@@ -457,6 +467,68 @@ verify it works. Follow these steps in order and stop at the first failure.
 7. Report what you installed, where the binary landed, which providers
    authenticated, and the exact output of any step that failed. Do not modify
    my shell configuration without telling me what you changed.
+
+PART 2 — HOW TO OPERATE RUDDER
+
+Core model. One `rudder run` owns one provider session. You choose a
+--state-dir; everything about the run lands there:
+   state.json      status, thread/turn IDs, token usage — never prompt text
+   events.jsonl    every raw provider event, append-only
+   trace.log       human-readable activity trace
+   output.md       completed agent messages, in order
+Trust output.md only when `rudder status --json` says "completed"; on
+"failed" or "interrupted" report the error field instead. The state dir must
+be fresh per run. Prompts always come from --prompt-file, never argv.
+
+Starting runs. Useful `rudder run` flags:
+   --provider codex|claude      default codex
+   --model / --effort           `rudder models --json` lists valid combos
+   --sandbox                    read-only | workspace-write (default) |
+                                danger-full-access
+   --cwd DIR                    the workspace the provider edits
+   --turn-timeout 1h            per-turn watchdog; 0 disables
+Long runs: launch in the background (or your harness's background mode), then
+watch with `rudder peek --state-dir DIR -n 25` and block bounded with
+`rudder wait --state-dir DIR --timeout 30m`. Never poll in a foreground loop.
+
+Steering. While a turn is active you can redirect it without restarting:
+   rudder steer --state-dir DIR "the correction, exact literals preserved"
+   rudder steer --state-dir DIR --message-file FILE   (multiline/shell-unsafe)
+Use steer when new information arrives mid-turn. To abort a wrong-premise turn
+use `rudder interrupt --state-dir DIR`, never kill -9. A rejected steer means
+the turn already ended — read the output; do not silently start a new run.
+
+Multi-turn (idle) sessions. Add --idle to `rudder run` and the process stays
+alive after each turn instead of exiting:
+   rudder prompt --state-dir DIR "next task"    starts the next turn
+   rudder stop   --state-dir DIR                graceful shutdown
+   --idle-timeout 4h                            auto-exit when unused
+status "idle" means ready for the next prompt; "active" means a turn is
+running (steer, don't prompt). Prompt and steer are different commands with
+different semantics — never substitute one for the other. Use idle mode when
+you expect follow-up turns: it keeps one process and one thread instead of
+spawning a fresh run per message.
+
+Continuing past work. Threads persist in the provider's own store:
+   rudder thread list --cwd-filter "$PWD"       recent threads for this repo
+   rudder thread search "keywords"              global search — verify cwd
+   rudder thread read --include-turns ID        inspect before resuming
+   rudder run --resume-thread ID ...            continue a thread in a new run
+   rudder run --fork-thread ID ...              branch it, preserving original
+Verify a candidate thread's cwd and content before resuming; never resume or
+fork a thread whose turn is still active.
+
+Watching everything at once. `rudder tui` shows a dashboard of live and
+recent sessions with a prompt box: type to steer an active turn, prompt an
+idle one, or continue a finished thread; `n` starts a new session, `m` picks
+the model, `x x` stops. `rudder tui --beta` switches to a chat-first layout.
+
+Ground rules:
+- Report token usage/cost from `rudder status --json` when the human asks
+  what a run cost.
+- state.json is intentionally content-redacted; never write prompt or
+  completion text into it or rely on it being there.
+- One state dir, one run, ever. New run, new dir.
 ````
 
 ## Development
