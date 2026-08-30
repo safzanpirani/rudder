@@ -61,6 +61,7 @@ While installing the global Rudder binary, macOS killed a final cmp -s verificat
 - **Directory:** `/Users/safzan/Development/projects/codex-rudder`
 - **About:** `tmux-skill`
 - **Tags:** `docs`
+- **Resolved:** 2026-08-30T20:50:10.977Z — The installed tmux skill no longer contains the positional helper example. wait-for-text.sh --help documents -t and -p, and the skill package validates successfully.
 
 The tmux SKILL.md helper example uses positional arguments for wait-for-text.sh, but the installed script requires -t and -p named flags. Update the example to match the helper's current CLI.
 
@@ -69,6 +70,7 @@ The tmux SKILL.md helper example uses positional arguments for wait-for-text.sh,
 - **Directory:** `/Users/safzan/Development/projects/codex-rudder`
 - **About:** `skill-creator`
 - **Tags:** `tooling`
+- **Resolved:** 2026-08-30T20:50:10.919Z — The bundled skill-creator instructions now invoke quick_validate.py through python3. The documented command passes while direct execution still correctly reflects the file's non-executable mode.
 
 The bundled quick_validate.py script is not executable, so the documented direct invocation fails with permission denied. Running it through python3 works; either add its executable bit or document python3 explicitly.
 
@@ -78,4 +80,11 @@ The bundled quick_validate.py script is not executable, so the documented direct
 - **Tags:** `test-gap`
 
 While restarting the TUI after a PTY verification, pressing q during an in-flight refresh destroyed the renderer before refresh finished. refresh then called setStatus on a destroyed TextBuffer and crashed; shutdown should await or cancel refresh work before renderer destruction.
+
+## c5fbac · 2026-08-30T20:45:45.194Z — codex — gpt-5.6-sol
+
+- **Directory:** `/Users/safzan/Development/projects/codex-rudder`
+- **Tags:** `flaky-command`
+
+The Pi RPC timeout regression test failed when bun test ran concurrently with Go tests and TypeScript checking, then passed alone and in a serial full Bun run. The 500ms test deadline appears sensitive to host contention.
 

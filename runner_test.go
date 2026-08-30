@@ -101,30 +101,198 @@ func TestStateDoesNotPersistPromptText(t *testing.T) {
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("state mode = %o, want 600", info.Mode().Perm())
 	}
+	claimInfo, err := os.Stat(filepath.Join(store.state.StateDir, stateClaimFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("state claim mode = %o, want 600", claimInfo.Mode().Perm())
+	}
+}
+
+func TestNewStateStoreRejectsTerminalStateDirectoryReuse(t *testing.T) {
+	stateDir := t.TempDir()
+	existing := runState{
+		Version:  2,
+		Provider: providerCodex,
+		PID:      os.Getpid(),
+		Status:   "completed",
+		StateDir: stateDir,
+	}
+	raw, err := json.Marshal(existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts := map[string][]byte{
+		stateFileName:         raw,
+		"events.jsonl":        []byte("old events\n"),
+		"trace.log":           []byte("old trace\n"),
+		"output.md":           []byte("old output\n"),
+		"provider.stderr.log": []byte("old stderr\n"),
+	}
+	for name, content := range artifacts {
+		if err := os.WriteFile(filepath.Join(stateDir, name), content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = newStateStore(runConfig{
+		Provider: providerCodex,
+		CWD:      t.TempDir(),
+		StateDir: stateDir,
+		Model:    "test-model",
+		Sandbox:  "read-only",
+	})
+	if err == nil || !strings.Contains(err.Error(), "already contains a Rudder run") {
+		t.Fatalf("state directory reuse error = %v", err)
+	}
+	for name, want := range artifacts {
+		got, readErr := os.ReadFile(filepath.Join(stateDir, name))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("artifact %s changed after rejected reuse", name)
+		}
+	}
+}
+
+func TestNewStateStoreRejectsArtifactsWithoutState(t *testing.T) {
+	for _, name := range []string{
+		"output.md",
+		stateClaimFileName,
+		stateFileName + ".tmp",
+		"output.md.tmp",
+	} {
+		t.Run(name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			artifactPath := filepath.Join(stateDir, name)
+			want := []byte("preserve me\n")
+			if err := os.WriteFile(artifactPath, want, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := newStateStore(runConfig{
+				Provider: providerCodex,
+				CWD:      t.TempDir(),
+				StateDir: stateDir,
+				Model:    "test-model",
+				Sandbox:  "read-only",
+			})
+			if err == nil || !strings.Contains(err.Error(), "already contains Rudder artifact "+name) {
+				t.Fatalf("artifact-only state directory error = %v", err)
+			}
+			got, readErr := os.ReadFile(artifactPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("existing artifact changed to %q", got)
+			}
+		})
+	}
+}
+
+func TestNewStateStoreAtomicallyClaimsStateDirectory(t *testing.T) {
+	stateDir := t.TempDir()
+	var ready sync.WaitGroup
+	ready.Add(2)
+	release := make(chan struct{})
+	type result struct {
+		store *stateStore
+		err   error
+	}
+	results := make(chan result, 2)
+	for _, model := range []string{"model-a", "model-b"} {
+		cwd := t.TempDir()
+		go func() {
+			store, err := newStateStore(runConfig{
+				Provider: providerCodex,
+				CWD:      cwd,
+				StateDir: stateDir,
+				Model:    model,
+				Sandbox:  "read-only",
+				BeforeStateReserve: func() {
+					ready.Done()
+					<-release
+				},
+			})
+			results <- result{store: store, err: err}
+		}()
+	}
+	ready.Wait()
+	close(release)
+	var winner *stateStore
+	failed := 0
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			failed++
+			if !strings.Contains(result.err.Error(), "claimed by another Rudder run") {
+				t.Fatalf("losing state claim error = %v", result.err)
+			}
+			continue
+		}
+		if winner != nil {
+			t.Fatal("two controllers claimed the same state directory")
+		}
+		winner = result.store
+	}
+	if winner == nil || failed != 1 {
+		t.Fatalf("state claims produced winner=%v failures=%d", winner != nil, failed)
+	}
+	persisted, err := readState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Model != winner.snapshot().Model {
+		t.Fatalf("loser changed winner state: persisted model=%q winner=%q", persisted.Model, winner.snapshot().Model)
+	}
+}
+
+func TestOpenPrivateLogRefusesExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	want := []byte("preserve me\n")
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if file, err := openPrivateLog(path); err == nil {
+		_ = file.Close()
+		t.Fatal("openPrivateLog replaced an existing file")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("existing log changed to %q", got)
+	}
 }
 
 func TestLogOpenFailurePersistsTerminalState(t *testing.T) {
 	dir := t.TempDir()
-	promptPath := filepath.Join(dir, "prompt.md")
 	stateDir := filepath.Join(dir, "run")
-	if err := os.WriteFile(promptPath, []byte("task"), 0o600); err != nil {
+	store, err := newStateStore(runConfig{
+		Provider: providerCodex,
+		CWD:      dir,
+		StateDir: stateDir,
+		Model:    "test-model",
+		Sandbox:  "read-only",
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(stateDir, "events.jsonl"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	err := runController(runConfig{
-		CWD:            dir,
-		PromptFile:     promptPath,
-		StateDir:       stateDir,
-		Model:          "test-model",
-		Sandbox:        "read-only",
-		ApprovalPolicy: "never",
-		ChildCommand:   []string{"unused"},
-	})
-	if err == nil {
-		t.Fatal("run unexpectedly succeeded")
+	r := &controller{
+		store:       store,
+		turnDone:    make(chan struct{}),
+		sessionDone: make(chan struct{}),
 	}
+	err = r.openLogs()
+	if err == nil {
+		t.Fatal("log open unexpectedly succeeded")
+	}
+	r.fail(err)
 	state, readErr := readState(stateDir)
 	if readErr != nil {
 		t.Fatal(readErr)
@@ -593,6 +761,28 @@ func TestValidateRunConfigRejectsForkSelectorMisuse(t *testing.T) {
 	}
 }
 
+func TestValidateRunConfigRejectsNegativeTimeouts(t *testing.T) {
+	base := runConfig{
+		CWD:          t.TempDir(),
+		Model:        "test-model",
+		Sandbox:      "read-only",
+		ChildCommand: []string{"codex"},
+	}
+	negativeTurn := base
+	negativeTurn.TurnTimeout = -time.Second
+	if err := validateRunConfig(&negativeTurn); err == nil || !strings.Contains(err.Error(), "--turn-timeout") {
+		t.Fatalf("negative turn timeout error = %v", err)
+	}
+	negativeIdle := base
+	negativeIdle.IdleTimeout = -time.Second
+	if err := validateRunConfig(&negativeIdle); err == nil || !strings.Contains(err.Error(), "--idle-timeout") {
+		t.Fatalf("negative idle timeout error = %v", err)
+	}
+	if err := validateRunConfig(&base); err != nil {
+		t.Fatalf("zero timeouts should remain valid: %v", err)
+	}
+}
+
 func TestWaitTimeoutParsesGoDurations(t *testing.T) {
 	stateDir := t.TempDir()
 	state := runState{Version: 1, PID: os.Getpid(), Status: "completed", StateDir: stateDir}
@@ -609,6 +799,41 @@ func TestWaitTimeoutParsesGoDurations(t *testing.T) {
 	err = waitCommand([]string{"--state-dir", stateDir, "--timeout", "3600"})
 	if err == nil || !strings.Contains(err.Error(), "parse") {
 		t.Fatalf("bare integer timeout should fail duration parsing, got %v", err)
+	}
+	err = waitCommand([]string{"--state-dir", stateDir, "--timeout", "-1s"})
+	if err == nil || !strings.Contains(err.Error(), "zero or positive") {
+		t.Fatalf("negative wait timeout should fail, got %v", err)
+	}
+}
+
+func TestRunCommandRequiresExplicitChildSeparator(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.md")
+	if err := os.WriteFile(promptPath, []byte("task"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"--prompt-file", promptPath, "--state-dir", filepath.Join(dir, "bare-run")}
+	err := runCommand(append(base, os.Args[0], "-test.run=TestRunCommandRequiresExplicitChildSeparator"))
+	if err == nil || !strings.Contains(err.Error(), "after --") {
+		t.Fatalf("bare child command error = %v", err)
+	}
+	if err := runCommand(append(base, "--")); err == nil || !strings.Contains(err.Error(), "after -- is empty") {
+		t.Fatalf("empty child command error = %v", err)
+	}
+
+	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDER_COMPLETE_ON_START", "1")
+	args := []string{
+		"--prompt-file", promptPath,
+		"--state-dir", filepath.Join(dir, "explicit-run"),
+		"--", os.Args[0], "-test.run=TestRunCommandRequiresExplicitChildSeparator",
+	}
+	if err := runCommand(args); err != nil {
+		t.Fatalf("explicit child command failed: %v", err)
 	}
 }
 
@@ -1205,8 +1430,12 @@ func TestRunFailsWhenAgentOutputCannotBePersisted(t *testing.T) {
 	if state.Status != "failed" {
 		t.Fatalf("status = %q, want failed", state.Status)
 	}
-	if _, err := os.Stat(filepath.Join(stateDir, "output.md")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("output.md unexpectedly exists or cannot be checked: %v", err)
+	output, err := os.ReadFile(filepath.Join(stateDir, "output.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output) != 0 {
+		t.Fatalf("failed output persistence changed reserved output.md to %q", output)
 	}
 }
 
@@ -1249,15 +1478,23 @@ func waitForRunStatus(t *testing.T, stateDir, want string) runState {
 
 func runHelperAppServer() {
 	if pidFile := os.Getenv("GO_WANT_RUDDER_GRANDCHILD_PID_FILE"); pidFile != "" {
-		child := exec.Command("sleep", "60")
+		var child *exec.Cmd
+		if os.Getenv("GO_WANT_RUDDER_TERM_IGNORING_GRANDCHILD") == "1" {
+			child = exec.Command("sh", "-c", `trap '' TERM; echo $$ > "$1"; while :; do sleep 1; done`, "rudder-grandchild", pidFile)
+		} else {
+			child = exec.Command("sleep", "60")
+		}
 		if err := child.Start(); err == nil {
-			_ = os.WriteFile(pidFile, []byte(strconv.Itoa(child.Process.Pid)), 0o600)
+			if os.Getenv("GO_WANT_RUDDER_TERM_IGNORING_GRANDCHILD") != "1" {
+				_ = os.WriteFile(pidFile, []byte(strconv.Itoa(child.Process.Pid)), 0o600)
+			}
 		}
 	}
 	scanner := bufio.NewScanner(os.Stdin)
 	enc := json.NewEncoder(os.Stdout)
 	turnCounter := 0
 	currentTurn := "turn-test"
+	rejectedSecondTurn := false
 	for scanner.Scan() {
 		var request struct {
 			ID     string         `json:"id"`
@@ -1269,6 +1506,9 @@ func runHelperAppServer() {
 		}
 		switch request.Method {
 		case "initialize":
+			if os.Getenv("GO_WANT_RUDDER_IGNORE_INITIALIZE") == "1" {
+				continue
+			}
 			_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "test"}})
 		case "thread/start":
 			if os.Getenv("GO_WANT_RUDDER_EXPECT_EPHEMERAL") == "1" && request.Params["ephemeral"] != true {
@@ -1345,6 +1585,17 @@ func runHelperAppServer() {
 			if os.Getenv("GO_WANT_RUDDER_MULTI_TURN") == "1" {
 				turnCounter++
 				currentTurn = fmt.Sprintf("turn-%d", turnCounter)
+				if turnCounter > 1 && !rejectedSecondTurn && os.Getenv("GO_WANT_RUDDER_REJECT_SECOND_TURN") == "1" {
+					rejectedSecondTurn = true
+					_ = enc.Encode(map[string]any{"id": request.ID, "error": map[string]any{"code": -32602, "message": "second turn rejected"}})
+					turnCounter--
+					currentTurn = fmt.Sprintf("turn-%d", turnCounter)
+					continue
+				}
+				if turnCounter > 1 && os.Getenv("GO_WANT_RUDDER_AMBIGUOUS_SECOND_TURN") == "1" {
+					_ = enc.Encode(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": "thread-test", "turn": map[string]any{"id": currentTurn, "status": "inProgress"}}})
+					continue
+				}
 				if os.Getenv("GO_WANT_RUDDER_DELAY_TURN_START") == "1" {
 					time.Sleep(200 * time.Millisecond)
 				}
@@ -1365,6 +1616,25 @@ func runHelperAppServer() {
 					}
 				}
 				continue
+			}
+			if os.Getenv("GO_WANT_RUDDER_COMPLETE_BEFORE_TURN_RESPONSE") == "1" {
+				_ = enc.Encode(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": "thread-test", "turn": map[string]any{"id": "turn-test", "status": "inProgress"}}})
+				_ = enc.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"item": map[string]any{"id": "message-early", "type": "agentMessage", "text": "EARLY"}}})
+				_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": "turn-test", "status": "completed"}}})
+				_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{"turn": map[string]any{"id": "turn-test", "status": "completed"}}})
+				return
+			}
+			if os.Getenv("GO_WANT_RUDDER_TURN_RESPONSE_NO_ID") == "1" {
+				_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{"turn": map[string]any{"status": "inProgress"}}})
+				return
+			}
+			if os.Getenv("GO_WANT_RUDDER_EARLY_ITEM_BEFORE_TURN_RESPONSE") == "1" {
+				_ = enc.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"item": map[string]any{"id": "message-live", "type": "agentMessage", "text": "LIVE BEFORE RESPONSE"}}})
+			}
+			if delay := os.Getenv("GO_WANT_RUDDER_TURN_RESPONSE_DELAY"); delay != "" {
+				if duration, err := time.ParseDuration(delay); err == nil {
+					time.Sleep(duration)
+				}
 			}
 			_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{"turn": map[string]any{"id": "turn-test", "status": "inProgress"}}})
 			_ = enc.Encode(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": "thread-test", "turn": map[string]any{"id": "turn-test", "status": "inProgress"}}})
@@ -1402,10 +1672,18 @@ func runHelperAppServer() {
 				_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": currentTurn, "status": "interrupted"}}})
 			}
 			_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{}})
+			if os.Getenv("GO_WANT_RUDDER_EXIT_AFTER_INTERRUPT_ACK") == "1" {
+				return
+			}
 			if os.Getenv("GO_WANT_RUDDER_INTERRUPT_ACK_ONLY") == "1" {
 				continue
 			}
 			if os.Getenv("GO_WANT_RUDDER_INTERRUPT_COMPLETE_FIRST") != "1" {
+				if delay := os.Getenv("GO_WANT_RUDDER_INTERRUPT_COMPLETION_DELAY"); delay != "" {
+					if duration, err := time.ParseDuration(delay); err == nil {
+						time.Sleep(duration)
+					}
+				}
 				_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": currentTurn, "status": "interrupted"}}})
 			}
 		default:
@@ -1413,6 +1691,9 @@ func runHelperAppServer() {
 				_ = enc.Encode(map[string]any{"id": request.ID, "error": map[string]any{"code": -32601, "message": fmt.Sprintf("unsupported %s", request.Method)}})
 			}
 		}
+	}
+	if marker := os.Getenv("GO_WANT_RUDDER_EOF_MARKER"); marker != "" {
+		_ = os.WriteFile(marker, []byte("stdin closed\n"), 0o600)
 	}
 }
 
@@ -1602,6 +1883,409 @@ func TestPromptRejectedWhileActiveAndInterruptReturnsToIdle(t *testing.T) {
 	}
 }
 
+func TestAcceptedPromptPrecedesEarlyProviderOutput(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.md")
+	stateDir := filepath.Join(dir, "run")
+	if err := os.WriteFile(promptPath, []byte("EARLY PROMPT"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDER_COMPLETE_BEFORE_TURN_RESPONSE", "1")
+	if err := runController(runConfig{
+		CWD:            dir,
+		PromptFile:     promptPath,
+		StateDir:       stateDir,
+		Model:          "test-model",
+		Sandbox:        "read-only",
+		ApprovalPolicy: "never",
+		ChildCommand:   []string{os.Args[0], "-test.run=TestAcceptedPromptPrecedesEarlyProviderOutput"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := os.ReadFile(filepath.Join(stateDir, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	promptIndex := bytes.Index(events, []byte(`"origin":"rudder"`))
+	outputIndex := bytes.Index(events, []byte(`"text":"EARLY"`))
+	if promptIndex < 0 || outputIndex < 0 || promptIndex >= outputIndex {
+		t.Fatalf("accepted prompt did not precede provider output:\n%s", events)
+	}
+	output, err := os.ReadFile(filepath.Join(stateDir, "output.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(output) != "EARLY\n" {
+		t.Fatalf("fast provider output = %q", output)
+	}
+}
+
+func TestProviderEventsRemainVisibleWhileTurnStartIsPending(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.md")
+	stateDir := filepath.Join(dir, "run")
+	if err := os.WriteFile(promptPath, []byte("VISIBLE PROMPT"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDER_EARLY_ITEM_BEFORE_TURN_RESPONSE", "1")
+	t.Setenv("GO_WANT_RUDDER_TURN_RESPONSE_DELAY", "500ms")
+	t.Setenv("GO_WANT_RUDDER_COMPLETE_ON_START", "1")
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runController(runConfig{
+			CWD:            dir,
+			PromptFile:     promptPath,
+			StateDir:       stateDir,
+			Model:          "test-model",
+			Sandbox:        "read-only",
+			ApprovalPolicy: "never",
+			ChildCommand:   []string{os.Args[0], "-test.run=TestProviderEventsRemainVisibleWhileTurnStartIsPending"},
+		})
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		events, err := os.ReadFile(filepath.Join(stateDir, "events.jsonl"))
+		if err == nil &&
+			bytes.Contains(events, []byte(`"origin":"rudder"`)) &&
+			bytes.Contains(events, []byte(`"text":"LIVE BEFORE RESPONSE"`)) {
+			state, stateErr := readState(stateDir)
+			if stateErr != nil {
+				t.Fatal(stateErr)
+			}
+			if state.Status != "starting" {
+				t.Fatalf("provider event became visible only after turn/start resolved: status=%s", state.Status)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("start-time provider activity was not visible before the response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTurnStartWithoutIDRecordsUnknownPromptOutcome(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.md")
+	stateDir := filepath.Join(dir, "run")
+	if err := os.WriteFile(promptPath, []byte("UNKNOWN PROMPT"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDER_TURN_RESPONSE_NO_ID", "1")
+	err := runController(runConfig{
+		CWD:            dir,
+		PromptFile:     promptPath,
+		StateDir:       stateDir,
+		Model:          "test-model",
+		Sandbox:        "read-only",
+		ApprovalPolicy: "never",
+		ChildCommand:   []string{os.Args[0], "-test.run=TestTurnStartWithoutIDRecordsUnknownPromptOutcome"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "no turn id") {
+		t.Fatalf("missing turn id error = %v", err)
+	}
+	events, readErr := os.ReadFile(filepath.Join(stateDir, "events.jsonl"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Contains(events, []byte(`"method":"rudder/prompt/unknown"`)) ||
+		bytes.Contains(events, []byte(`"method":"rudder/prompt/accepted"`)) {
+		t.Fatalf("missing-ID prompt decision is wrong:\n%s", events)
+	}
+}
+
+func TestIdleInterruptWaitsForProviderCompletion(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	stateDir, errCh := startIdleHelperRun(t, map[string]string{
+		"GO_WANT_RUDDER_MULTI_TURN_HOLD":            "1",
+		"GO_WANT_RUDDER_INTERRUPT_COMPLETION_DELAY": "250ms",
+	}, nil)
+	waitForRunStatus(t, stateDir, "active")
+	type controlResult struct {
+		response controlResponse
+		err      error
+	}
+	resultCh := make(chan controlResult, 1)
+	go func() {
+		response, err := sendControl(stateDir, controlRequest{Command: "interrupt"}, 2*time.Second)
+		resultCh <- controlResult{response: response, err: err}
+	}()
+	select {
+	case result := <-resultCh:
+		t.Fatalf("interrupt returned before provider completion: response=%#v err=%v", result.response, result.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if state, err := readState(stateDir); err != nil {
+		t.Fatal(err)
+	} else if state.Status != "active" {
+		t.Fatalf("status before provider completion = %q, want active", state.Status)
+	}
+	result := <-resultCh
+	if result.err != nil || !result.response.OK {
+		t.Fatalf("interrupt response = %#v, err=%v", result.response, result.err)
+	}
+	waitForRunStatus(t, stateDir, "idle")
+	if _, err := sendControl(stateDir, controlRequest{Command: "shutdown"}, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errCh; err == nil || !strings.Contains(err.Error(), "interrupted") {
+		t.Fatalf("final run error = %v", err)
+	}
+}
+
+func TestIdleInterruptSettlementTimeoutFailsSession(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	stateDir, errCh := startIdleHelperRun(t, map[string]string{
+		"GO_WANT_RUDDER_MULTI_TURN_HOLD":    "1",
+		"GO_WANT_RUDDER_INTERRUPT_ACK_ONLY": "1",
+	}, func(cfg *runConfig) {
+		cfg.InterruptTimeout = 50 * time.Millisecond
+	})
+	waitForRunStatus(t, stateDir, "active")
+	response, err := sendControl(stateDir, controlRequest{Command: "interrupt"}, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.OK || !strings.Contains(response.Error, "did not settle") {
+		t.Fatalf("interrupt timeout response = %#v", response)
+	}
+	if err := <-errCh; err == nil || !strings.Contains(err.Error(), "did not settle") {
+		t.Fatalf("run error = %v", err)
+	}
+	state, err := readState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != "failed" || processAlive(state.ChildPID) {
+		t.Fatalf("interrupt timeout left bad state: %#v", state)
+	}
+}
+
+func TestIdleInterruptReportsProviderExitAfterAcknowledgement(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	stateDir, errCh := startIdleHelperRun(t, map[string]string{
+		"GO_WANT_RUDDER_MULTI_TURN_HOLD":          "1",
+		"GO_WANT_RUDDER_EXIT_AFTER_INTERRUPT_ACK": "1",
+	}, nil)
+	waitForRunStatus(t, stateDir, "active")
+	response, err := sendControl(stateDir, controlRequest{Command: "interrupt"}, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.OK || !strings.Contains(response.Error, "provider output closed") {
+		t.Fatalf("interrupt provider-exit response = %#v", response)
+	}
+	if err := <-errCh; err == nil || !strings.Contains(err.Error(), "provider output closed") {
+		t.Fatalf("run error = %v", err)
+	}
+	state, err := readState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != "failed" {
+		t.Fatalf("provider exit status = %q, want failed", state.Status)
+	}
+}
+
+func TestAmbiguousSecondTurnStartFailsSession(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	stateDir, errCh := startIdleHelperRun(t, map[string]string{
+		"GO_WANT_RUDDER_AMBIGUOUS_SECOND_TURN": "1",
+	}, func(cfg *runConfig) {
+		cfg.IdleTurnStartTimeout = 50 * time.Millisecond
+	})
+	waitForRunStatus(t, stateDir, "idle")
+	response, err := sendControl(stateDir, controlRequest{Command: "prompt", Text: "ambiguous turn"}, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.OK {
+		t.Fatalf("ambiguous prompt succeeded: %#v", response)
+	}
+	if err := <-errCh; err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("run error = %v", err)
+	}
+	state, err := readState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != "failed" || processAlive(state.ChildPID) {
+		t.Fatalf("ambiguous start left bad state: %#v", state)
+	}
+}
+
+func TestRejectedSecondTurnRestoresIdle(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	stateDir, errCh := startIdleHelperRun(t, map[string]string{
+		"GO_WANT_RUDDER_REJECT_SECOND_TURN": "1",
+	}, nil)
+	waitForRunStatus(t, stateDir, "idle")
+	response, err := sendControl(stateDir, controlRequest{Command: "prompt", Text: "rejected turn"}, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.OK || !strings.Contains(response.Error, "second turn rejected") {
+		t.Fatalf("rejected prompt response = %#v", response)
+	}
+	waitForRunStatus(t, stateDir, "idle")
+	response, err = sendControl(stateDir, controlRequest{Command: "prompt", Text: "accepted turn"}, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK {
+		t.Fatalf("prompt after rejection failed: %#v", response)
+	}
+	state := waitForRunStatus(t, stateDir, "idle")
+	if state.Turns != 2 {
+		t.Fatalf("turns after rejection and retry = %d, want 2", state.Turns)
+	}
+	output, err := os.ReadFile(filepath.Join(stateDir, "output.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(output) != "TURN 1\n\n---\n\nTURN 2\n" {
+		t.Fatalf("output after rejection and retry = %q", output)
+	}
+	events, err := os.ReadFile(filepath.Join(stateDir, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bytes.Count(events, []byte(`"origin":"rudder"`)); got != 3 {
+		t.Fatalf("prompt attempt count = %d, want 3", got)
+	}
+	if got := bytes.Count(events, []byte(`"method":"rudder/prompt/accepted"`)); got != 2 {
+		t.Fatalf("accepted prompt decision count = %d, want 2", got)
+	}
+	if got := bytes.Count(events, []byte(`"method":"rudder/prompt/rejected"`)); got != 1 {
+		t.Fatalf("rejected prompt decision count = %d, want 1", got)
+	}
+	if _, err := sendControl(stateDir, controlRequest{Command: "shutdown"}, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestThreadCommandCancellationTerminatesProcessTree(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group assertion requires Unix")
+	}
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "grandchild.pid")
+	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDER_IGNORE_INITIALIZE", "1")
+	t.Setenv("GO_WANT_RUDDER_GRANDCHILD_PID_FILE", pidFile)
+	t.Setenv("GO_WANT_RUDDER_TERM_IGNORING_GRANDCHILD", "1")
+	ctx, cancel := context.WithCancel(context.Background())
+	session, err := startAppServerSession(ctx, dir, []string{os.Args[0], "-test.run=TestThreadCommandCancellationTerminatesProcessTree"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initErrCh := make(chan error, 1)
+	go func() { initErrCh <- session.initialize() }()
+	deadline := time.Now().Add(2 * time.Second)
+	var grandchildPID int
+	for time.Now().Before(deadline) {
+		raw, readErr := os.ReadFile(pidFile)
+		if readErr == nil {
+			parsedPID, parseErr := strconv.Atoi(strings.TrimSpace(string(raw)))
+			if parseErr == nil && parsedPID > 0 {
+				grandchildPID = parsedPID
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if grandchildPID == 0 {
+		t.Fatal("helper did not record its grandchild pid")
+	}
+	t.Cleanup(func() {
+		if processAlive(grandchildPID) {
+			if process, findErr := os.FindProcess(grandchildPID); findErr == nil {
+				_ = process.Kill()
+			}
+		}
+	})
+	cancel()
+	select {
+	case err := <-initErrCh:
+		if err == nil {
+			t.Fatal("canceled initialize returned nil")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled initialize did not return")
+	}
+	session.close()
+	for processAlive(grandchildPID) && time.Now().Before(deadline.Add(5*time.Second)) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if processAlive(grandchildPID) {
+		t.Fatalf("thread command grandchild pid %d is still alive", grandchildPID)
+	}
+}
+
+func TestThreadCommandCloseAllowsGracefulEOF(t *testing.T) {
+	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+		runHelperAppServer()
+		os.Exit(0)
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "eof.marker")
+	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDER_EOF_MARKER", marker)
+	session, err := startAppServerSession(context.Background(), dir, []string{os.Args[0], "-test.run=TestThreadCommandCloseAllowsGracefulEOF"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.initialize(); err != nil {
+		t.Fatal(err)
+	}
+	session.close()
+	if raw, err := os.ReadFile(marker); err != nil {
+		t.Fatalf("helper did not finish its EOF cleanup: %v", err)
+	} else if string(raw) != "stdin closed\n" {
+		t.Fatalf("EOF marker = %q", raw)
+	}
+}
+
 func TestSecondTurnSteerCarriesCurrentThreadAndTurn(t *testing.T) {
 	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
 		runHelperAppServer()
@@ -1620,7 +2304,21 @@ func TestSecondTurnSteerCarriesCurrentThreadAndTurn(t *testing.T) {
 	if state.TurnID != "turn-2" {
 		t.Fatalf("turn id = %q, want turn-2", state.TurnID)
 	}
-	if response, err := sendControl(stateDir, controlRequest{Command: "steer", Text: "new direction"}, 5*time.Second); err != nil || !response.OK {
+	response, err := sendControl(stateDir, controlRequest{
+		Command:        "steer",
+		Text:           "stale direction",
+		ExpectedTurnID: "turn-1",
+	}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.OK || !strings.Contains(response.Error, "active turn changed") {
+		t.Fatalf("stale-turn steer response = %#v", response)
+	}
+	if state = waitForRunStatus(t, stateDir, "active"); state.Steers != 0 {
+		t.Fatalf("stale-turn steer changed state: %#v", state)
+	}
+	if response, err := sendControl(stateDir, controlRequest{Command: "steer", Text: "new direction", ExpectedTurnID: "turn-2"}, 5*time.Second); err != nil || !response.OK {
 		t.Fatalf("steer response = %#v, err=%v", response, err)
 	}
 	waitForRunStatus(t, stateDir, "idle")

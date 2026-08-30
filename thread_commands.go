@@ -18,6 +18,7 @@ import (
 
 type appServerSession struct {
 	cmd     *exec.Cmd
+	ctx     context.Context
 	stdin   io.WriteCloser
 	scanner *bufio.Scanner
 	waitCh  chan error
@@ -177,6 +178,11 @@ func invokeAppServer(cwd string, childCommand []string, method string, params an
 func startAppServerSession(ctx context.Context, cwd string, childCommand []string) (*appServerSession, error) {
 	cmd := exec.CommandContext(ctx, childCommand[0], childCommand[1:]...)
 	configureChildProcess(cmd)
+	cmd.Cancel = func() error {
+		terminateProcessTree(cmd, false)
+		return nil
+	}
+	cmd.WaitDelay = 3 * time.Second
 	cmd.Dir = cwd
 	cmd.Stderr = os.Stderr
 	stdout, err := cmd.StdoutPipe()
@@ -194,7 +200,7 @@ func startAppServerSession(ctx context.Context, cwd string, childCommand []strin
 	scanner.Buffer(make([]byte, 64*1024), maxRPCLineBytes)
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
-	return &appServerSession{cmd: cmd, stdin: stdin, scanner: scanner, waitCh: waitCh}, nil
+	return &appServerSession{cmd: cmd, ctx: ctx, stdin: stdin, scanner: scanner, waitCh: waitCh}, nil
 }
 
 func (s *appServerSession) initialize() error {
@@ -258,9 +264,24 @@ func (s *appServerSession) close() {
 	_ = s.stdin.Close()
 	select {
 	case <-s.waitCh:
+		if s.ctx.Err() != nil {
+			terminateProcessTree(s.cmd, true)
+		}
+		return
 	case <-time.After(3 * time.Second):
-		terminateProcessTree(s.cmd, true)
-		<-s.waitCh
+	}
+	if s.ctx.Err() == nil {
+		terminateProcessTree(s.cmd, false)
+		select {
+		case <-s.waitCh:
+			return
+		case <-time.After(3 * time.Second):
+		}
+	}
+	terminateProcessTree(s.cmd, true)
+	select {
+	case <-s.waitCh:
+	case <-time.After(3 * time.Second):
 	}
 }
 

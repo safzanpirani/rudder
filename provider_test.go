@@ -165,3 +165,34 @@ func TestFindAdapterEntryDoesNotExecuteWorkspaceAdapter(t *testing.T) {
 		t.Fatalf("workspace adapter resolved as %q with error %v", resolved, err)
 	}
 }
+
+func TestFindClaudeAdapterEntryDoesNotExecuteWorkspaceAdapter(t *testing.T) {
+	workspace := t.TempDir()
+	workspaceEntry := filepath.Join(workspace, "claude", "app-server.ts")
+	if err := os.MkdirAll(filepath.Dir(workspaceEntry), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workspaceEntry, []byte("throw new Error('workspace adapter');\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataHome := t.TempDir()
+	installedEntry := filepath.Join(dataHome, "rudder", "claude", "app-server.ts")
+	if err := os.MkdirAll(filepath.Dir(installedEntry), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(installedEntry, []byte("export {};\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(workspace)
+	t.Setenv(claudeAdapterEntryEnvironment, "")
+	t.Setenv(legacyClaudeAdapterEntryEnvironment, "")
+	t.Setenv("XDG_DATA_HOME", dataHome)
+
+	resolved, err := findClaudeAdapterEntry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != installedEntry {
+		t.Fatalf("Claude adapter = %q, want installed entry %q", resolved, installedEntry)
+	}
+}

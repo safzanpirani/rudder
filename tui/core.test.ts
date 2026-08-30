@@ -14,6 +14,7 @@ import {
   dashboardNavigation,
   filterSessions,
   initialViewState,
+  idlePromptControlArguments,
   latestAgentUpdate,
   parseTraceActivities,
   parseToolEventDetails,
@@ -22,10 +23,13 @@ import {
   sessionDescription,
   sessionDetails,
   statusGlyph,
+  steerControlArguments,
   visibleArtifactTail,
   visibleSessions,
   formatTokenUsage,
   promptModeForSession,
+  promptTargetForSession,
+  resolvePromptTarget,
   modelPickerOptions,
   parseModelCatalog,
   newSessionRunArguments,
@@ -695,6 +699,81 @@ describe("promptable TUI helpers", () => {
     expect(promptModeForSession(undefined)).toBeUndefined();
   });
 
+  test("builds distinct idle-prompt and turn-bound steer commands", () => {
+    expect(idlePromptControlArguments("/run-a", "/message.md")).toEqual([
+      "prompt",
+      "--state-dir",
+      "/run-a",
+      "--message-file",
+      "/message.md",
+    ]);
+    expect(
+      steerControlArguments("/run-a", "turn-a", "/message.md"),
+    ).toEqual([
+      "steer",
+      "--state-dir",
+      "/run-a",
+      "--expected-turn-id",
+      "turn-a",
+      "--message-file",
+      "/message.md",
+    ]);
+  });
+
+  test("binds an open prompt to its original compatible session", () => {
+    const original = session({ stateDir: "/run-a", status: "active" });
+    const other = session({ stateDir: "/run-b", status: "active" });
+    const target = promptTargetForSession(original);
+    expect(target).toEqual({
+      stateDir: "/run-a",
+      route: "steer",
+      turnId: "turn-1234567890",
+    });
+
+    const refreshedOriginal = { ...original, steers: 1 };
+    expect(resolvePromptTarget([other, refreshedOriginal], target!)).toBe(
+      refreshedOriginal,
+    );
+    expect(resolvePromptTarget([other], target!)).toBeUndefined();
+    expect(
+      resolvePromptTarget(
+        [other, { ...refreshedOriginal, status: "idle" }],
+        target!,
+      ),
+    ).toBeUndefined();
+    expect(
+      resolvePromptTarget(
+        [other, { ...refreshedOriginal, turnId: "turn-next" }],
+        target!,
+      ),
+    ).toBeUndefined();
+  });
+
+  test("keeps a continuation target valid across terminal statuses", () => {
+    const completed = session({
+      stateDir: "/run-a",
+      status: "completed",
+      threadId: "thread-a",
+      cwd: "/work/a",
+    });
+    const target = promptTargetForSession(completed)!;
+    const failed = { ...completed, status: "failed" };
+
+    expect(target.route).toBe("continue");
+    expect(resolvePromptTarget([failed], target)).toBe(failed);
+
+    const newer = Array.from({ length: 20 }, (_, index) =>
+      session({
+        stateDir: `/run-newer-${index}`,
+        status: "completed",
+        completedAt: `2026-08-26T00:${String(index).padStart(2, "0")}:00Z`,
+      }),
+    );
+    const all = [...newer, completed];
+    expect(visibleSessions(all, false, [])).not.toContain(completed);
+    expect(resolvePromptTarget(all, target)).toBe(completed);
+  });
+
   test("distinguishes the idle glyph and ranks idle sessions live", () => {
     expect(statusGlyph("idle")).toBe("◌");
     const shown = visibleSessions([session({ status: "idle" })], false, [], 0);
@@ -780,6 +859,8 @@ describe("promptable TUI helpers", () => {
       { method: "item/completed", params: { threadId: "sub", item: { id: "sub-1", type: "commandExecution", command: "hidden" } } },
       { method: "item/completed", params: { threadId: "root", item: { type: "agentMessage", text: "done" } } },
       { method: "item/completed", params: { threadId: "root", item: { type: "userMessage", origin: "rudder", text: "now this" } } },
+      { method: "item/completed", params: { threadId: "root", item: { id: "prompt-rejected", type: "userMessage", origin: "rudder", text: "do not show" } } },
+      { method: "rudder/prompt/rejected", params: { promptId: "prompt-rejected" } },
     ]
       .map((line) => JSON.stringify(line))
       .join("\n");

@@ -765,6 +765,7 @@ export function parseChatTranscript(
 ): ChatEntry[] {
   const entries: ChatEntry[] = [];
   const toolIndexById = new Map<string, number>();
+  const rejectedPromptIds = new Set<string>();
   const rootThreads = new Set<string>(rootThreadId ? [rootThreadId] : []);
   for (const line of content.split("\n")) {
     try {
@@ -772,6 +773,7 @@ export function parseChatTranscript(
         method?: string;
         params?: {
           threadId?: string;
+          promptId?: string;
           item?: {
             id?: string;
             type?: string;
@@ -786,6 +788,13 @@ export function parseChatTranscript(
           };
         };
       };
+      if (
+        event.method === "rudder/prompt/rejected" &&
+        event.params?.promptId
+      ) {
+        rejectedPromptIds.add(event.params.promptId);
+        continue;
+      }
       const item = event.params?.item;
       const threadId = event.params?.threadId;
       if (item?.type === "userMessage" && item.origin === "rudder" && threadId)
@@ -797,7 +806,7 @@ export function parseChatTranscript(
       if (item.type === "userMessage") {
         const text = item.text?.trim();
         if (event.method === "item/completed" && text)
-          entries.push({ kind: "user", text });
+          entries.push({ kind: "user", text, itemId: item.id });
         continue;
       }
       if (item.type === "agentMessage") {
@@ -854,7 +863,12 @@ export function parseChatTranscript(
       // A bounded tail may begin in the middle of a JSONL record.
     }
   }
-  return entries;
+  return entries.filter(
+    (entry) =>
+      entry.kind !== "user" ||
+      !entry.itemId ||
+      !rejectedPromptIds.has(entry.itemId),
+  );
 }
 
 function flattenSummary(value: unknown): string {
@@ -1002,6 +1016,35 @@ export function formatTokenUsage(usage: TokenUsage | undefined): string {
 
 export type PromptRoute = "steer" | "prompt" | "continue";
 
+export interface PromptTarget {
+  stateDir: string;
+  route: PromptRoute;
+  turnId?: string;
+}
+
+export function idlePromptControlArguments(
+  stateDir: string,
+  messageFile: string,
+): string[] {
+  return ["prompt", "--state-dir", stateDir, "--message-file", messageFile];
+}
+
+export function steerControlArguments(
+  stateDir: string,
+  turnId: string,
+  messageFile: string,
+): string[] {
+  return [
+    "steer",
+    "--state-dir",
+    stateDir,
+    "--expected-turn-id",
+    turnId,
+    "--message-file",
+    messageFile,
+  ];
+}
+
 // Routes a typed prompt: active turns get steered, idle sessions get a new
 // turn over the control socket, finished threads get a continuation run.
 // Never converts one route into another.
@@ -1020,6 +1063,32 @@ export function promptModeForSession(
   )
     return "continue";
   return undefined;
+}
+
+export function promptTargetForSession(
+  session: Session | undefined,
+): PromptTarget | undefined {
+  const route = promptModeForSession(session);
+  if (!session || !route) return undefined;
+  if (route === "steer") {
+    return session.turnId
+      ? { stateDir: session.stateDir, route, turnId: session.turnId }
+      : undefined;
+  }
+  return { stateDir: session.stateDir, route };
+}
+
+export function resolvePromptTarget(
+  sessions: Session[],
+  target: PromptTarget,
+): Session | undefined {
+  const session = sessions.find(
+    (candidate) => candidate.stateDir === target.stateDir,
+  );
+  if (promptModeForSession(session) !== target.route) return undefined;
+  if (target.route === "steer" && session?.turnId !== target.turnId)
+    return undefined;
+  return session;
 }
 
 export interface ModelInfo {

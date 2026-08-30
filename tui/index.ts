@@ -31,6 +31,7 @@ import {
   filterSessions,
   formatTokenUsage,
   initialViewState,
+  idlePromptControlArguments,
   latestAgentUpdate,
   modelPickerOptions,
   newSessionRunArguments,
@@ -42,13 +43,16 @@ import {
   parseToolEventDetails,
   parseTraceActivities,
   promptModeForSession,
+  promptTargetForSession,
   readTail,
   reduceView,
+  resolvePromptTarget,
   sessionDescription,
   sessionDetails,
   sessionLabel,
   sessionsPanelTitle,
   statusGlyph,
+  steerControlArguments,
   visibleArtifactTail,
   visibleSessions,
   FALLBACK_MODELS,
@@ -56,6 +60,7 @@ import {
   type ChatEntry,
   type DejaHit,
   type ModelInfo,
+  type PromptTarget,
   type Session,
   type ToolEventDetail,
   type TraceActivity,
@@ -115,6 +120,7 @@ async function main(): Promise<void> {
 
   try {
     let discoveredSessions: Session[] = [];
+    let listedSessions: Session[] = [];
     let sessions: Session[] = [];
     let view: ViewState = initialViewState;
     const refreshGate = new AsyncTaskGate();
@@ -128,6 +134,7 @@ async function main(): Promise<void> {
     };
     let searchMode: SearchMode | undefined;
     let promptMode: PromptMode | undefined;
+    let promptTarget: PromptTarget | undefined;
     let sessionsVisible = false;
     let modelPickerOpen = false;
     let dejaPickerOpen = false;
@@ -669,8 +676,10 @@ async function main(): Promise<void> {
         const changed = option?.value !== view.selectedStateDir;
         view = reduceView(view, { type: "select", stateDir: option?.value });
         if (changed) {
-          pendingModel = undefined;
-          pendingResume = undefined;
+          if (!promptMode) {
+            pendingModel = undefined;
+            pendingResume = undefined;
+          }
           resetArtifactPosition();
         }
         void updateSelectedSession();
@@ -1138,6 +1147,7 @@ async function main(): Promise<void> {
       pendingResume = undefined;
       pendingModel = undefined;
       promptMode = "new";
+      promptTarget = undefined;
       openPromptInput();
       openModelPicker();
     }
@@ -1214,6 +1224,7 @@ async function main(): Promise<void> {
       pendingResume = hit;
       pendingModel = undefined;
       promptMode = "new";
+      promptTarget = undefined;
       openPromptInput();
       setStatus(
         `Resuming ${hit.provider} session ${hit.sessionId.slice(0, 12)}… — type the next prompt`,
@@ -1222,19 +1233,21 @@ async function main(): Promise<void> {
 
     function openPrompt(mode: "auto" | "continue"): void {
       const session = selectedSession();
-    const route = promptModeForSession(session);
-    if (mode === "auto" && !route) {
+      const target = promptTargetForSession(session);
+      if (!target) {
         setStatus(
-          session
-            ? `Session is ${session.status}; press n for a new session`
-            : "No session selected; press n for a new session",
+          mode === "continue"
+            ? "Select a finished session with a thread and working directory to continue"
+            : session
+              ? `Session is ${session.status}; press n for a new session`
+              : "No session selected; press n for a new session",
           true,
         );
         return;
       }
       if (
         mode === "continue" &&
-    promptModeForSession(session) !== "continue"
+        target.route !== "continue"
       ) {
         setStatus(
           "Select a finished session with a thread and working directory to continue",
@@ -1242,10 +1255,10 @@ async function main(): Promise<void> {
         );
         return;
       }
-    promptMode = mode === "auto" ? route : mode;
-    if (promptMode === "steer" || promptMode === "prompt") {
-    pendingModel = undefined;
-    }
+      promptMode = target.route;
+      promptTarget = target;
+      if (promptMode === "steer" || promptMode === "prompt")
+        pendingModel = undefined;
       openPromptInput();
     }
 
@@ -1258,7 +1271,13 @@ async function main(): Promise<void> {
     }
 
     function updatePromptChrome(): void {
-      const session = selectedSession();
+      const promptStateDir = promptTarget?.stateDir;
+      const session =
+        promptMode && promptMode !== "new" && promptStateDir
+          ? discoveredSessions.find(
+              (candidate) => candidate.stateDir === promptStateDir,
+            )
+          : selectedSession();
       const modelLabel =
         pendingModel && (promptMode === "new" || promptMode === "continue")
           ? (pendingModel.label ?? pendingModel.id)
@@ -1305,6 +1324,7 @@ async function main(): Promise<void> {
       pendingModel = undefined;
       pendingResume = undefined;
       promptMode = undefined;
+      promptTarget = undefined;
       view = reduceView(view, { type: "close-steer" });
       view = { ...view, focus: "artifact" };
       artifactScroll.focus();
@@ -1321,20 +1341,42 @@ async function main(): Promise<void> {
         await startNewSession(message);
         return;
       }
-      const session = selectedSession();
-    const route = mode;
-      if (route === "steer") await submitSteer(message);
-      else if (route === "prompt") await submitIdlePrompt(message);
-      else if (route === "continue") await continueThread(message);
-      else setStatus("Session can no longer accept a prompt", true);
+      const target = promptTarget;
+      if (!target || target.route !== mode) {
+        setStatus(
+          "The prompt target is no longer available; the prompt was not sent",
+          true,
+        );
+        return;
+      }
+      const session = resolvePromptTarget(discoveredSessions, target);
+      if (!session) {
+        const current = discoveredSessions.find(
+          (candidate) => candidate.stateDir === target.stateDir,
+        );
+        setStatus(
+          current?.status === "active" && target.route === "steer"
+            ? "The active turn changed; the prompt was not sent"
+            : current
+              ? `Session is now ${current.status}; the prompt was not sent`
+            : "The prompt session is no longer available; the prompt was not sent",
+          true,
+        );
+        return;
+      }
+      if (mode === "steer") await submitSteer(message, session);
+      else if (mode === "prompt") await submitIdlePrompt(message, session);
+      else await continueThread(message, session);
     }
 
-    async function submitIdlePrompt(message: string): Promise<void> {
-      const session = selectedSession();
-    if (!session || session.status !== "idle") {
-    setStatus("Session is no longer idle; the prompt was not sent", true);
-    return;
-    }
+    async function submitIdlePrompt(
+      message: string,
+      session: Session,
+    ): Promise<void> {
+      if (session.status !== "idle") {
+        setStatus("Session is no longer idle; the prompt was not sent", true);
+        return;
+      }
       actionRunning = true;
       closePrompt();
       setStatus("Sending prompt…");
@@ -1344,13 +1386,10 @@ async function main(): Promise<void> {
         await chmod(scratchDirectory, 0o700);
         const messageFile = join(scratchDirectory, "message.md");
         await writeFile(messageFile, `${message}\n`, { mode: 0o600 });
-        const result = await runControl(args.rudder, [
-          "prompt",
-          "--state-dir",
-          session.stateDir,
-          "--message-file",
-          messageFile,
-        ]);
+        const result = await runControl(
+          args.rudder,
+          idlePromptControlArguments(session.stateDir, messageFile),
+        );
         setStatus(result || "Prompt accepted");
         await refresh();
         setTimeout(() => void refresh(), 300);
@@ -1411,12 +1450,14 @@ async function main(): Promise<void> {
       }
     }
 
-    async function submitSteer(message: string): Promise<void> {
-      const session = selectedSession();
-    if (!session || session.status !== "active") {
-    setStatus("Turn is no longer active; the steer was not sent", true);
-    return;
-    }
+    async function submitSteer(
+      message: string,
+      session: Session,
+    ): Promise<void> {
+      if (session.status !== "active") {
+        setStatus("Turn is no longer active; the steer was not sent", true);
+        return;
+      }
       actionRunning = true;
       closePrompt();
       setStatus(`Steering ${sessionLabel(session)}…`);
@@ -1426,13 +1467,10 @@ async function main(): Promise<void> {
         await chmod(scratchDirectory, 0o700);
         const messageFile = join(scratchDirectory, "message.md");
         await writeFile(messageFile, `${message}\n`, { mode: 0o600 });
-        const result = await runControl(args.rudder, [
-          "steer",
-          "--state-dir",
-          session.stateDir,
-          "--message-file",
-          messageFile,
-        ]);
+        const result = await runControl(
+          args.rudder,
+          steerControlArguments(session.stateDir, session.turnId!, messageFile),
+        );
         setStatus(result || "Steer accepted");
         await refresh();
       } catch (error) {
@@ -1444,8 +1482,10 @@ async function main(): Promise<void> {
       }
     }
 
-    async function continueThread(message: string): Promise<void> {
-      const session = selectedSession();
+    async function continueThread(
+      message: string,
+      session: Session,
+    ): Promise<void> {
       if (!session?.threadId || !session.cwd || isLive(session)) return;
       const modelOverride = pendingModel;
       actionRunning = true;
@@ -1533,11 +1573,12 @@ async function main(): Promise<void> {
       return refreshGate.run(async () => {
         if (reason) setStatus(reason);
         try {
-          discoveredSessions = visibleSessions(
-            await discoverSessions({
-              roots: args.roots,
-              stateDirs: args.stateDirs,
-            }),
+          discoveredSessions = await discoverSessions({
+            roots: args.roots,
+            stateDirs: args.stateDirs,
+          });
+          listedSessions = visibleSessions(
+            discoveredSessions,
             args.includeAll,
             args.stateDirs,
           );
@@ -1552,7 +1593,7 @@ async function main(): Promise<void> {
 
     function applySessionFilter(): void {
       const selectedStateDir = view.selectedStateDir;
-      sessions = filterSessions(discoveredSessions, sessionQuery);
+      sessions = filterSessions(listedSessions, sessionQuery);
       view = reduceView(view, { type: "sessions", sessions });
       sessionList.options = sessions.map((session) => ({
         name: `${isLive(session) ? "LIVE" : "RECENT"}  ${sessionLabel(session)}`,

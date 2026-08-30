@@ -13,6 +13,7 @@ import (
 )
 
 const stateFileName = "state.json"
+const stateClaimFileName = ".rudder.claim"
 
 // Darwin allows 104 bytes including the trailing NUL; this conservative limit
 // also works on Linux and leaves room for platform bookkeeping.
@@ -81,11 +82,28 @@ func newStateStore(cfg runConfig) (*stateStore, error) {
 		return nil, err
 	}
 	existing, err := readState(stateDir)
-	if err == nil && !terminalStatus(existing.Status) && processAlive(existing.PID) {
-		return nil, fmt.Errorf("state directory already belongs to active Rudder pid %d", existing.PID)
+	if err == nil {
+		return nil, fmt.Errorf("state directory already contains a Rudder run with status %s; use a new --state-dir", existing.Status)
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read existing state: %w", err)
+	}
+	for _, name := range []string{
+		stateClaimFileName,
+		stateFileName + ".tmp",
+		"events.jsonl",
+		"trace.log",
+		"output.md",
+		"output.md.tmp",
+		"provider.stderr.log",
+		".rudder.sock",
+	} {
+		artifactPath := filepath.Join(stateDir, name)
+		if _, err := os.Lstat(artifactPath); err == nil {
+			return nil, fmt.Errorf("state directory already contains Rudder artifact %s; use a new --state-dir", name)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("inspect state directory artifact %s: %w", name, err)
+		}
 	}
 	now := time.Now().UTC()
 	socketPath, socketDir, err := controlSocketLocation(stateDir)
@@ -115,11 +133,17 @@ func newStateStore(cfg runConfig) (*stateStore, error) {
 			UpdatedAt:  now,
 		},
 	}
-	if err := store.persistLocked(); err != nil {
+	if cfg.BeforeStateReserve != nil {
+		cfg.BeforeStateReserve()
+	}
+	if err := persistInitialState(store.path, store.state); err != nil {
 		if socketDir != "" {
 			_ = os.RemoveAll(socketDir)
 		}
-		return nil, err
+		if errors.Is(err, os.ErrExist) {
+			return nil, errors.New("state directory was claimed by another Rudder run; use a new --state-dir")
+		}
+		return nil, fmt.Errorf("reserve state directory: %w", err)
 	}
 	if cfg.RegisterRun {
 		_ = registerRunStateDir(stateDir)
@@ -157,16 +181,38 @@ func (s *stateStore) snapshot() runState {
 	return s.state
 }
 
-func (s *stateStore) persistLocked() error {
-	return persistState(s.path, s.state)
+func marshalState(state runState) ([]byte, error) {
+	raw, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(raw, '\n'), nil
 }
 
-func persistState(path string, state runState) error {
-	raw, err := json.MarshalIndent(state, "", "  ")
+func persistInitialState(path string, state runState) error {
+	claimPath := filepath.Join(filepath.Dir(path), stateClaimFileName)
+	file, err := os.OpenFile(claimPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	raw = append(raw, '\n')
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := persistState(path, state); err != nil {
+		return err
+	}
+	return nil
+}
+
+func persistState(path string, state runState) error {
+	raw, err := marshalState(state)
+	if err != nil {
+		return err
+	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return err

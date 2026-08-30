@@ -232,6 +232,9 @@ For exact multiline input:
   --message-file .scratch/rudder-demo/steer.md
 ```
 
+Automation can pass `--expected-turn-id ID` to reject a steer when the selected
+session advances to another active turn before submission.
+
 ## Idle sessions: multi-turn without new processes
 
 `rudder run --idle` keeps the controller and provider alive after a turn
@@ -254,9 +257,9 @@ Rules:
 - `--idle-timeout` (default 4h) exits the session after that long idle; the
   final persisted status is the last turn's terminal status.
 - `--turn-timeout` applies per turn.
-- `output.md` separates turns with `---`; each prompt is also recorded as a
-  synthetic `userMessage` item in `events.jsonl` (private artifact) so the TUI
-  can render a conversation.
+- `output.md` separates turns with `---`; each prompt attempt is recorded as a
+  synthetic `userMessage` item followed by an append-only decision event in
+  `events.jsonl`. The TUI hides rejected attempts.
 - state.json gains `idle`, `turns`, and `tokenUsage` (cumulative counts,
   context window, and cost when the provider reports one). Prompt text still
   never reaches state.json.
@@ -360,8 +363,9 @@ beside the binary or in the current checkout. For custom development paths, set
 
 Run artifacts:
 
+- `.rudder.claim` — atomic ownership marker that prevents state-directory reuse.
 - `state.json` — IDs, status, paths, and timestamps; no prompt or output text.
-- `events.jsonl` — raw provider protocol events.
+- `events.jsonl` — raw provider protocol events plus Rudder prompt decisions.
 - `trace.log` — compact human-readable progress.
 - `output.md` — all completed `agentMessage` items in order.
 - `provider.stderr.log` — child diagnostics (legacy runs retain their persisted

@@ -12,8 +12,9 @@ import (
 )
 
 type controlRequest struct {
-	Command string `json:"command"`
-	Text    string `json:"text,omitempty"`
+	Command        string `json:"command"`
+	Text           string `json:"text,omitempty"`
+	ExpectedTurnID string `json:"expectedTurnId,omitempty"`
 }
 
 type controlResponse struct {
@@ -87,7 +88,7 @@ func (r *controller) acceptControl() {
 
 func (r *controller) handleControl(conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(time.Minute))
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
 	var request controlRequest
 	if err := json.NewDecoder(conn).Decode(&request); err != nil {
 		_ = json.NewEncoder(conn).Encode(controlResponse{OK: false, Error: err.Error(), State: r.store.snapshot()})
@@ -102,7 +103,7 @@ func (r *controller) handleControl(conn net.Conn) {
 			response.Error = "steering text is empty"
 			break
 		}
-		if err := r.steer(request.Text); err != nil {
+		if err := r.steer(request.Text, request.ExpectedTurnID); err != nil {
 			response.Error = err.Error()
 			break
 		}
@@ -136,10 +137,13 @@ func (r *controller) handleControl(conn net.Conn) {
 	_ = json.NewEncoder(conn).Encode(response)
 }
 
-func (r *controller) steer(text string) error {
+func (r *controller) steer(text, expectedTurnID string) error {
 	state := r.store.snapshot()
 	if state.Status != "active" || state.ThreadID == "" || state.TurnID == "" {
 		return fmt.Errorf("turn is not steerable: status=%s", state.Status)
+	}
+	if expectedTurnID != "" && state.TurnID != expectedTurnID {
+		return fmt.Errorf("active turn changed from %s to %s; steer was not sent", expectedTurnID, state.TurnID)
 	}
 	var result struct {
 		TurnID string `json:"turnId"`
@@ -236,15 +240,44 @@ func (r *controller) interrupt() error {
 	if state.Status != "active" || state.ThreadID == "" || state.TurnID == "" {
 		return fmt.Errorf("turn is not active: status=%s", state.Status)
 	}
+	r.turnMu.Lock()
+	turnDone := r.turnDone
+	r.turnMu.Unlock()
+	interruptTimeout := r.cfg.InterruptTimeout
+	if interruptTimeout <= 0 {
+		interruptTimeout = defaultInterruptOperationTimeout
+	}
+	deadline := time.Now().Add(interruptTimeout)
 	rpcErr := r.call("turn/interrupt", map[string]any{
 		"threadId": state.ThreadID,
 		"turnId":   state.TurnID,
-	}, nil, 30*time.Second)
+	}, nil, time.Until(deadline))
 	if r.cfg.Idle && rpcErr == nil {
-		// Idle sessions survive an interrupt: end the turn, keep the child,
-		// and let the run loop return to idle for the next prompt.
-		r.finishTurn("interrupted", "")
-		return nil
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			remaining = time.Nanosecond
+		}
+		timer := time.NewTimer(remaining)
+		defer timer.Stop()
+		select {
+		case <-turnDone:
+			return r.interruptSettlementResult()
+		case <-r.sessionDone:
+			select {
+			case <-turnDone:
+				return r.interruptSettlementResult()
+			default:
+			}
+			return errors.New("session ended before the interrupted turn settled")
+		case <-timer.C:
+			settleErr := fmt.Errorf("interrupted turn %s did not settle within %s", state.TurnID, interruptTimeout)
+			if !r.endSessionIfTurnOpen("failed", settleErr.Error()) {
+				return r.interruptSettlementResult()
+			}
+			r.stopChild.Store(true)
+			terminateProcessTree(r.child, false)
+			return settleErr
+		}
 	}
 	r.stopChild.Store(true)
 	if rpcErr != nil {
@@ -260,6 +293,20 @@ func (r *controller) interrupt() error {
 		return errors.New(resultErr)
 	}
 	return rpcErr
+}
+
+func (r *controller) interruptSettlementResult() error {
+	state := r.store.snapshot()
+	if state.Status == "failed" {
+		if resultErr := r.privateResultError(); resultErr != "" {
+			return errors.New(resultErr)
+		}
+		if state.Error != "" {
+			return errors.New(state.Error)
+		}
+		return errors.New("provider failed before the interrupted turn settled")
+	}
+	return nil
 }
 
 func sendControl(stateDir string, request controlRequest, timeout time.Duration) (controlResponse, error) {

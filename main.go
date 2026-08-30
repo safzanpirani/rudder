@@ -100,8 +100,20 @@ func runCommandContext(ctx context.Context, args []string) error {
 	fs.BoolVar(&cfg.Idle, "idle", false, "stay alive after a turn completes and accept prompt commands on the control socket")
 	fs.DurationVar(&cfg.IdleTimeout, "idle-timeout", 4*time.Hour, "exit after this long idle; zero disables")
 	cfg.RegisterRun = true
-	if err := fs.Parse(args); err != nil {
+	flagArgs := args
+	var childArgs []string
+	if marker := indexOf(args, "--"); marker >= 0 {
+		flagArgs = args[:marker]
+		childArgs = args[marker+1:]
+		if len(childArgs) == 0 {
+			return errors.New("app-server command after -- is empty")
+		}
+	}
+	if err := fs.Parse(flagArgs); err != nil {
 		return err
+	}
+	if len(fs.Args()) > 0 {
+		return fmt.Errorf("unexpected run arguments %q; put a custom Codex app-server command after --", strings.Join(fs.Args(), " "))
 	}
 	if cfg.PromptFile == "" {
 		return errors.New("--prompt-file is required")
@@ -109,7 +121,7 @@ func runCommandContext(ctx context.Context, args []string) error {
 	if cfg.StateDir == "" {
 		return errors.New("--state-dir is required")
 	}
-	if err := configureProviderDefaults(&cfg, fs.Args()); err != nil {
+	if err := configureProviderDefaults(&cfg, childArgs); err != nil {
 		return err
 	}
 	return runControllerContext(ctx, cfg)
@@ -117,10 +129,11 @@ func runCommandContext(ctx context.Context, args []string) error {
 
 func steerCommand(args []string) error {
 	fs := flag.NewFlagSet("steer", flag.ContinueOnError)
-	var stateDir, messageFile string
+	var stateDir, messageFile, expectedTurnID string
 	var timeout time.Duration
 	fs.StringVar(&stateDir, "state-dir", "", "Rudder run state directory")
 	fs.StringVar(&messageFile, "message-file", "", "read steering text from this file")
+	fs.StringVar(&expectedTurnID, "expected-turn-id", "", "reject the steer if the active turn changed")
 	fs.DurationVar(&timeout, "timeout", 30*time.Second, "control request timeout")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -149,7 +162,14 @@ func steerCommand(args []string) error {
 	if state.Status != "active" {
 		return fmt.Errorf("turn is not steerable: status=%s", state.Status)
 	}
-	response, err := sendControl(stateDir, controlRequest{Command: "steer", Text: message}, timeout)
+	if expectedTurnID != "" && state.TurnID != expectedTurnID {
+		return fmt.Errorf("active turn changed from %s to %s; steer was not sent", expectedTurnID, state.TurnID)
+	}
+	response, err := sendControl(stateDir, controlRequest{
+		Command:        "steer",
+		Text:           message,
+		ExpectedTurnID: expectedTurnID,
+	}, timeout)
 	if err != nil {
 		return err
 	}
@@ -283,7 +303,7 @@ func interruptCommand(args []string) error {
 	var stateDir string
 	var timeout time.Duration
 	fs.StringVar(&stateDir, "state-dir", "", "Rudder run state directory")
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "control request timeout")
+	fs.DurationVar(&timeout, "timeout", defaultInterruptOperationTimeout+5*time.Second, "control request timeout")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -314,6 +334,9 @@ func waitCommand(args []string) error {
 	fs.DurationVar(&timeout, "timeout", 0, "maximum wait; zero means no limit")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if timeout < 0 {
+		return errors.New("--timeout must be zero or positive")
 	}
 	deadline := time.Time{}
 	if timeout > 0 {

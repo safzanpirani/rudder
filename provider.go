@@ -150,9 +150,6 @@ func findClaudeAdapterEntry() (string, error) {
 			candidates = append(candidates, configured)
 		}
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		candidates = append(candidates, filepath.Join(cwd, "claude", "app-server.ts"))
-	}
 	if executable, err := os.Executable(); err == nil {
 		candidates = appendRuntimeSiblingCandidates(candidates, executable, "claude", "app-server.ts")
 	}

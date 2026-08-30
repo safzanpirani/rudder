@@ -20,8 +20,10 @@ import (
 )
 
 const (
-	maxRPCLineBytes        = 64 * 1024 * 1024
-	defaultRPCWriteTimeout = 10 * time.Second
+	maxRPCLineBytes                  = 64 * 1024 * 1024
+	defaultRPCWriteTimeout           = 10 * time.Second
+	defaultIdleTurnStartTimeout      = 40 * time.Second
+	defaultInterruptOperationTimeout = 30 * time.Second
 )
 
 type runConfig struct {
@@ -47,6 +49,10 @@ type runConfig struct {
 	IdleTimeout       time.Duration
 	ChildCommand      []string
 	RegisterRun       bool
+	// The internal seams keep lifecycle regression tests fast and deterministic.
+	IdleTurnStartTimeout time.Duration
+	InterruptTimeout     time.Duration
+	BeforeStateReserve   func()
 }
 
 type promptRequest struct {
@@ -60,6 +66,27 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
+type rpcResponseError struct {
+	code    int
+	message string
+}
+
+func (e *rpcResponseError) Error() string {
+	return fmt.Sprintf("%s (%d)", e.message, e.code)
+}
+
+type ambiguousTurnStartError struct {
+	err error
+}
+
+func (e *ambiguousTurnStartError) Error() string {
+	return e.err.Error()
+}
+
+func (e *ambiguousTurnStartError) Unwrap() error {
+	return e.err
+}
+
 type rpcEnvelope struct {
 	ID     json.RawMessage `json:"id,omitempty"`
 	Method string          `json:"method,omitempty"`
@@ -69,39 +96,40 @@ type rpcEnvelope struct {
 }
 
 type controller struct {
-	cfg          runConfig
-	store        *stateStore
-	child        *exec.Cmd
-	childIn      io.WriteCloser
-	listener     net.Listener
-	events       *os.File
-	trace        *os.File
-	stderr       *os.File
-	writeMu      sync.Mutex
-	eventsMu     sync.Mutex
-	traceMu      sync.Mutex
-	outputMu     sync.Mutex
-	outputParts  []string
-	resultMu     sync.Mutex
-	resultError  string
-	pendingMu    sync.Mutex
-	pending      map[string]chan rpcEnvelope
-	nextID       atomic.Uint64
-	turnMu       sync.Mutex
-	turnDone     chan struct{}
-	turnEnded    bool
-	turnCount    int
-	lastTurn     string
-	sessionEnded bool
-	sessionDone  chan struct{}
-	sessionOnce  sync.Once
-	cancelOnce   sync.Once
-	promptCh     chan promptRequest
-	shutdownCh   chan struct{}
-	shutdownOnce sync.Once
-	waitCh       chan error
-	readDone     chan struct{}
-	stopChild    atomic.Bool
+	cfg           runConfig
+	store         *stateStore
+	child         *exec.Cmd
+	childIn       io.WriteCloser
+	listener      net.Listener
+	events        *os.File
+	trace         *os.File
+	stderr        *os.File
+	writeMu       sync.Mutex
+	eventsMu      sync.Mutex
+	traceMu       sync.Mutex
+	outputMu      sync.Mutex
+	outputParts   []string
+	resultMu      sync.Mutex
+	resultError   string
+	pendingMu     sync.Mutex
+	pending       map[string]chan rpcEnvelope
+	nextID        atomic.Uint64
+	promptEventID atomic.Uint64
+	turnMu        sync.Mutex
+	turnDone      chan struct{}
+	turnEnded     bool
+	turnCount     int
+	lastTurn      string
+	sessionEnded  bool
+	sessionDone   chan struct{}
+	sessionOnce   sync.Once
+	cancelOnce    sync.Once
+	promptCh      chan promptRequest
+	shutdownCh    chan struct{}
+	shutdownOnce  sync.Once
+	waitCh        chan error
+	readDone      chan struct{}
+	stopChild     atomic.Bool
 }
 
 func runController(cfg runConfig) error {
@@ -220,6 +248,12 @@ func validateRunConfig(cfg *runConfig) error {
 	if (cfg.ForkBeforeTurnID != "" || cfg.ForkThroughTurnID != "") && cfg.ForkThreadID == "" {
 		return errors.New("fork turn selectors require --fork-thread")
 	}
+	if cfg.TurnTimeout < 0 {
+		return errors.New("--turn-timeout must be zero or positive")
+	}
+	if cfg.IdleTimeout < 0 {
+		return errors.New("--idle-timeout must be zero or positive")
+	}
 	switch cfg.Sandbox {
 	case "read-only", "workspace-write", "danger-full-access":
 	default:
@@ -243,11 +277,24 @@ func (r *controller) openLogs() error {
 		r.events.Close()
 		return err
 	}
+	output, err := openPrivateLog(state.OutputPath)
+	if err != nil {
+		r.stderr.Close()
+		r.trace.Close()
+		r.events.Close()
+		return err
+	}
+	if err := output.Close(); err != nil {
+		r.stderr.Close()
+		r.trace.Close()
+		r.events.Close()
+		return err
+	}
 	return nil
 }
 
 func openPrivateLog(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -290,7 +337,10 @@ func (r *controller) startChild() error {
 		return err
 	}
 	go r.readChild(childOut)
-	go func() { r.waitCh <- r.child.Wait() }()
+	go func() {
+		<-r.readDone
+		r.waitCh <- r.child.Wait()
+	}()
 	if err := r.store.update(func(state *runState) { state.ChildPID = r.child.Process.Pid }); err != nil {
 		r.stopChild.Store(true)
 		r.shutdownChild()
@@ -349,7 +399,6 @@ func (r *controller) startTurn(prompt string, timeout time.Duration) error {
 		r.appendOutputSeparator()
 		r.tracef("[turn] prompt #%d: %s", turnNumber, oneLine(prompt, 180))
 	}
-	r.recordUserMessageEvent(prompt)
 	state := r.store.snapshot()
 	turnParams := map[string]any{
 		"threadId": state.ThreadID,
@@ -367,13 +416,42 @@ func (r *controller) startTurn(prompt string, timeout time.Duration) error {
 			Status string `json:"status"`
 		} `json:"turn"`
 	}
+	promptEventID := fmt.Sprintf("rudder-prompt-%d", r.promptEventID.Add(1))
+	if err := r.recordPromptAttempt(promptEventID, prompt); err != nil {
+		if rollbackErr := r.rollbackRejectedTurn(turnNumber); rollbackErr != nil {
+			return fmt.Errorf("record prompt attempt: %v; rollback: %w", err, rollbackErr)
+		}
+		return fmt.Errorf("record prompt attempt: %w", err)
+	}
 	if err := r.call("turn/start", turnParams, &turnResult, timeout); err != nil {
-		r.abandonTurn()
-		return fmt.Errorf("start turn: %w", err)
+		accepted := r.store.snapshot().TurnID != ""
+		var responseErr *rpcResponseError
+		if !accepted && errors.As(err, &responseErr) {
+			if eventErr := r.recordPromptDecision(promptEventID, "rejected"); eventErr != nil {
+				return &ambiguousTurnStartError{err: fmt.Errorf("record rejected prompt: %w", eventErr)}
+			}
+			if rollbackErr := r.rollbackRejectedTurn(turnNumber); rollbackErr != nil {
+				return &ambiguousTurnStartError{err: fmt.Errorf("turn/start rejection could not be rolled back: %w", rollbackErr)}
+			}
+			return fmt.Errorf("start turn: %w", err)
+		}
+		decision := "unknown"
+		if accepted {
+			decision = "accepted"
+		}
+		if eventErr := r.recordPromptDecision(promptEventID, decision); eventErr != nil {
+			return &ambiguousTurnStartError{err: fmt.Errorf("record ambiguous prompt outcome: %w", eventErr)}
+		}
+		return &ambiguousTurnStartError{err: fmt.Errorf("start turn outcome is ambiguous: %w", err)}
 	}
 	if turnResult.Turn.ID == "" {
-		r.abandonTurn()
-		return errors.New("turn/start returned no turn id")
+		if err := r.recordPromptDecision(promptEventID, "unknown"); err != nil {
+			return &ambiguousTurnStartError{err: fmt.Errorf("turn/start response returned no turn id; record unknown prompt outcome: %w", err)}
+		}
+		return &ambiguousTurnStartError{err: errors.New("turn/start outcome is ambiguous: response returned no turn id")}
+	}
+	if err := r.recordPromptDecision(promptEventID, "accepted"); err != nil {
+		return &ambiguousTurnStartError{err: fmt.Errorf("record accepted prompt: %w", err)}
 	}
 	if err := r.store.update(func(current *runState) {
 		current.TurnID = turnResult.Turn.ID
@@ -381,10 +459,36 @@ func (r *controller) startTurn(prompt string, timeout time.Duration) error {
 			current.Status = "active"
 		}
 	}); err != nil {
-		r.abandonTurn()
-		return fmt.Errorf("persist active turn: %w", err)
+		return &ambiguousTurnStartError{err: fmt.Errorf("turn/start outcome is ambiguous: persist active turn: %w", err)}
 	}
 	r.tracef("[turn] active thread=%s turn=%s", state.ThreadID, turnResult.Turn.ID)
+	return nil
+}
+
+func (r *controller) rollbackRejectedTurn(turnNumber int) error {
+	if err := r.store.update(func(state *runState) {
+		if state.Turns == turnNumber {
+			state.Turns = turnNumber - 1
+		}
+		state.TurnID = ""
+	}); err != nil {
+		return fmt.Errorf("persist rejected turn rollback: %w", err)
+	}
+	r.outputMu.Lock()
+	if len(r.outputParts) > 0 && r.outputParts[len(r.outputParts)-1] == "---" {
+		r.outputParts = r.outputParts[:len(r.outputParts)-1]
+	}
+	r.outputMu.Unlock()
+	r.turnMu.Lock()
+	defer r.turnMu.Unlock()
+	if r.turnEnded {
+		return errors.New("rejected turn ended before rollback")
+	}
+	r.turnEnded = true
+	if r.turnCount == turnNumber {
+		r.turnCount--
+	}
+	close(r.turnDone)
 	return nil
 }
 
@@ -484,11 +588,22 @@ func (r *controller) idleLoop(ctx context.Context) {
 				err = errors.New("session left the observed idle turn before the prompt was accepted")
 			}
 			if err == nil {
-				err = r.startTurn(request.text, 40*time.Second)
+				timeout := r.cfg.IdleTurnStartTimeout
+				if timeout <= 0 {
+					timeout = defaultIdleTurnStartTimeout
+				}
+				err = r.startTurn(request.text, timeout)
 			}
-			request.reply <- err
 			if err != nil {
 				r.tracef("[error] prompt turn failed to start: %v", err)
+				var ambiguous *ambiguousTurnStartError
+				if errors.As(err, &ambiguous) {
+					r.stopChild.Store(true)
+					r.fail(err)
+					terminateProcessTree(r.child, false)
+					request.reply <- err
+					return
+				}
 				if accepted {
 					r.turnMu.Lock()
 					updateErr := r.store.update(func(state *runState) {
@@ -502,8 +617,10 @@ func (r *controller) idleLoop(ctx context.Context) {
 						return
 					}
 				}
+				request.reply <- err
 				continue
 			}
+			request.reply <- nil
 			r.waitTurn()
 		case <-r.shutdownCh:
 			stopTimer()
@@ -658,7 +775,7 @@ func (r *controller) call(method string, params any, target any, timeout time.Du
 	select {
 	case response := <-responseCh:
 		if response.Error != nil {
-			return fmt.Errorf("%s (%d)", response.Error.Message, response.Error.Code)
+			return &rpcResponseError{code: response.Error.Code, message: response.Error.Message}
 		}
 		if target != nil && len(response.Result) > 0 {
 			if err := json.Unmarshal(response.Result, target); err != nil {
@@ -1049,6 +1166,25 @@ func (r *controller) endSession(status, errText string) {
 	r.sessionOnce.Do(func() { close(r.sessionDone) })
 }
 
+// endSessionIfTurnOpen claims an active turn and ends its session atomically.
+// It returns false when another lifecycle event settled the turn first.
+func (r *controller) endSessionIfTurnOpen(status, errText string) bool {
+	r.turnMu.Lock()
+	if r.turnEnded || r.sessionEnded {
+		r.turnMu.Unlock()
+		return false
+	}
+	r.sessionEnded = true
+	r.turnEnded = true
+	r.lastTurn = status
+	turnDone := r.turnDone
+	r.persistTerminal(status, errText)
+	close(turnDone)
+	r.turnMu.Unlock()
+	r.sessionOnce.Do(func() { close(r.sessionDone) })
+	return true
+}
+
 func (r *controller) cancelSession() {
 	r.cancelOnce.Do(func() {
 		r.stopChild.Store(true)
@@ -1076,34 +1212,49 @@ func (r *controller) persistTerminal(status, errText string) {
 }
 
 func (r *controller) writeEventLine(line []byte) {
+	_ = r.appendEventLine(line)
+}
+
+func (r *controller) appendEventLine(line []byte) error {
 	r.eventsMu.Lock()
 	defer r.eventsMu.Unlock()
 	if r.events == nil {
-		return
+		return errors.New("events log is not open")
 	}
-	_, _ = r.events.Write(line)
+	_, err := r.events.Write(line)
+	return err
 }
 
-// recordUserMessageEvent appends a synthetic userMessage item to events.jsonl
-// so the TUI transcript can interleave the user's prompts with agent output.
-// events.jsonl is a private 0600 artifact, so prompt text is allowed there.
-func (r *controller) recordUserMessageEvent(text string) {
+func (r *controller) recordPromptAttempt(id, text string) error {
 	state := r.store.snapshot()
 	raw, err := json.Marshal(map[string]any{
 		"method": "item/completed",
 		"params": map[string]any{
 			"threadId": state.ThreadID,
 			"item": map[string]any{
+				"id":     id,
 				"type":   "userMessage",
 				"text":   text,
 				"origin": "rudder",
+				"status": "pending",
 			},
 		},
 	})
 	if err != nil {
-		return
+		return err
 	}
-	r.writeEventLine(append(raw, '\n'))
+	return r.appendEventLine(append(raw, '\n'))
+}
+
+func (r *controller) recordPromptDecision(id, decision string) error {
+	raw, err := json.Marshal(map[string]any{
+		"method": "rudder/prompt/" + decision,
+		"params": map[string]any{"promptId": id},
+	})
+	if err != nil {
+		return err
+	}
+	return r.appendEventLine(append(raw, '\n'))
 }
 
 func (r *controller) appendOutputSeparator() {
