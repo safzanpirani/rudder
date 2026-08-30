@@ -552,6 +552,16 @@ Ground rules:
 - One state dir, one run, ever. New run, new dir.
 ````
 
+## Agent skill: delegate work through Rudder
+
+[`skills/rudder-delegate`](skills/rudder-delegate/SKILL.md) is an installable
+agent skill that teaches a coding agent to hand a hard or long task to a
+steerable Codex or Claude sub-agent through Rudder: build a self-contained
+brief, launch in the background, monitor, steer mid-turn, wait bounded, and
+verify the handoff. Install it by copying the directory into your agent's
+skills location (for Claude Code, `~/.claude/skills/` or the project's
+`.claude/skills/`).
+
 ## Development
 
 ```bash
