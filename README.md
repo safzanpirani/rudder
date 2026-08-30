@@ -6,7 +6,7 @@ Rudder is a small CLI that keeps a live handle on long-running Codex and Claude
 Code sessions. Watch a turn as it runs, and redirect it mid-flight — no waiting
 for it to finish, no killing it and starting over.
 
-![rudder in action](demo/rudder-demo.gif)
+![rudder TUI dashboard](demo/tui-dashboard.png)
 
 ```bash
 rudder run --prompt-file task.md --state-dir run &   # start a turn
