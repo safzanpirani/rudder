@@ -678,3 +678,8 @@ go build -o ruddr .
 bun test
 bunx tsc -p tsconfig.json --noEmit
 ```
+
+## License
+
+MIT. See `LICENSE`. Third-party components are listed in
+`THIRD_PARTY_NOTICES.md`.
