@@ -80,14 +80,137 @@ export interface DiscoverOptions {
   processAlive?: (pid: number) => boolean;
 }
 
-export type Artifact = "chat" | "trace" | "output";
+export type Artifact = "chat" | "trace" | "output" | "diff";
+
+export type GitDiffLineKind =
+  | "file"
+  | "hunk"
+  | "addition"
+  | "deletion"
+  | "metadata"
+  | "context";
+
+export interface GitDiffLine {
+  kind: GitDiffLineKind;
+  text: string;
+}
+
+export interface GitDiffTreeEntry {
+  label: string;
+  rowIndex: number;
+  kind: "directory" | "file";
+  path: string;
+  expanded?: boolean;
+}
+
+export function diffTreeWidthForPointer(
+  pointerX: number,
+  containerX: number,
+  containerWidth: number,
+): number {
+  const minimum = 20;
+  const maximum = Math.max(minimum, Math.min(60, containerWidth - 40));
+  return Math.max(minimum, Math.min(maximum, pointerX - containerX));
+}
+
+export function parseGitDiff(content: string): GitDiffLine[] {
+  if (!content) return [];
+  return content.replace(/\n$/, "").split("\n").map((text) => {
+    let kind: GitDiffLineKind = "context";
+    if (text.startsWith("diff --git ")) kind = "file";
+    else if (text.startsWith("@@")) kind = "hunk";
+    else if (text.startsWith("+") && !text.startsWith("+++"))
+      kind = "addition";
+    else if (text.startsWith("-") && !text.startsWith("---"))
+      kind = "deletion";
+    else if (
+      text.startsWith("index ") ||
+      text.startsWith("---") ||
+      text.startsWith("+++") ||
+      text.startsWith("new file mode ") ||
+      text.startsWith("deleted file mode ") ||
+      text.startsWith("similarity index ") ||
+      text.startsWith("rename from ") ||
+      text.startsWith("rename to ") ||
+      text.startsWith("Binary files ") ||
+      text === "\\ No newline at end of file"
+    )
+      kind = "metadata";
+    return { kind, text };
+  });
+}
+
+export function gitDiffTree(
+  lines: GitDiffLine[],
+  collapsedDirectories: ReadonlySet<string> = new Set(),
+): GitDiffTreeEntry[] {
+  const files: Array<{
+    path: string;
+    rowIndex: number;
+    additions: number;
+    deletions: number;
+  }> = [];
+  let current: (typeof files)[number] | undefined;
+  for (const [rowIndex, line] of lines.entries()) {
+    if (line.kind === "file") {
+      const match = /^diff --git (?:"?a\/)(.+?)"? (?:"?b\/)(.+?)"?$/.exec(
+        line.text,
+      );
+      const path = match?.[2] ?? line.text.replace(/^diff --git /, "");
+      current = { path, rowIndex, additions: 0, deletions: 0 };
+      files.push(current);
+    } else if (current && line.kind === "addition") current.additions++;
+    else if (current && line.kind === "deletion") current.deletions++;
+  }
+
+  const entries: GitDiffTreeEntry[] = [];
+  const directories = new Set<string>();
+  for (const file of files) {
+    const parts = file.path.split("/");
+    let hidden = false;
+    for (let depth = 0; depth < parts.length - 1; depth++) {
+      const directory = parts.slice(0, depth + 1).join("/");
+      if (!directories.has(directory)) {
+        directories.add(directory);
+        const expanded = !collapsedDirectories.has(directory);
+        entries.push({
+          label: `${"  ".repeat(depth)}${expanded ? "▾" : "▸"} 󰉋 ${parts[depth]}`,
+          rowIndex: file.rowIndex,
+          kind: "directory",
+          path: directory,
+          expanded,
+        });
+      }
+      if (collapsedDirectories.has(directory)) {
+        hidden = true;
+        break;
+      }
+    }
+    if (hidden) continue;
+    const depth = parts.length - 1;
+    const counts = `+${file.additions} −${file.deletions}`;
+    entries.push({
+      label: `${"  ".repeat(depth)}  󰈔 ${parts[depth]}  ${counts}`,
+      rowIndex: file.rowIndex,
+      kind: "file",
+      path: file.path,
+    });
+  }
+  return entries;
+}
 
 export function artifactAllowsTextSelection(artifact: Artifact): boolean {
-  return artifact === "output";
+  return artifact === "output" || artifact === "diff";
 }
 
 export function nextArtifact(artifact: Artifact): Artifact {
-  return artifact === "chat" ? "trace" : artifact === "trace" ? "output" : "chat";
+  return artifact === "chat"
+    ? "trace"
+    : artifact === "trace"
+      ? "output"
+      : artifact === "output"
+        ? "diff"
+        : "chat";
 }
 export type Focus = "sessions" | "artifact" | "steer";
 export type TUILayout = "classic" | "beta";

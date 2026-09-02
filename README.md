@@ -302,7 +302,7 @@ arguments:
 
 The default TUI uses an at-a-glance dashboard. A persistent sessions pane shows
 live and recent runs on the left. The right column shows session details, the
-lowercase Chat, Activity, and Output tabs, and the selected artifact. The
+lowercase Chat, Activity, Output, and Diff tabs, and the selected artifact. The
 prompt input spans the full width below the dashboard. Press `Tab` to switch
 focus between the sessions pane and the selected artifact. Press `Esc` in the
 sessions pane to return focus to the artifact.
@@ -326,7 +326,11 @@ a chosen session under rudder.
 
 `/` filters by project, thread, status, or model when the sessions pane has
 focus. `/` searches the selected artifact when the artifact has focus. Chat,
-Activity, and Output are clickable tabs (`o` cycles). Both panes support
+Activity, Output, and Diff are clickable tabs (`o` cycles). Diff shows the
+selected session's tracked staged and unstaged working-tree changes against
+`HEAD` and refreshes while the TUI runs. Wide terminals also show a changed-file
+tree with per-file line counts; selecting a file jumps to its patch. Drag the
+divider beside the tree to reveal long paths or give the patch more room. Both panes support
 mouse-wheel scrolling, `/` search with `n`/`N` match navigation, and `c` to copy
 the selected row. In Activity, clicking selects a row and clicking a tool row
 expands it; use the Output tab for normal mouse text selection. Enter also

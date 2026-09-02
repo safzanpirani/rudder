@@ -88,3 +88,27 @@ While restarting the TUI after a PTY verification, pressing q during an in-fligh
 
 The Pi RPC timeout regression test failed when bun test ran concurrently with Go tests and TypeScript checking, then passed alone and in a serial full Bun run. The 500ms test deadline appears sensitive to host contention.
 
+## 39d04c · 2026-09-02T12:21:16.158Z — codex — gpt-5.6-sol
+
+- **Directory:** `/Users/safzan/Development/projects/codex-rudder`
+- **About:** `fleet`
+- **Tags:** `misleading-error`
+
+While deploying Rudder to Ampere, I hardcoded an expected SHA-256 that did not match the freshly cross-built artifact. The integrity guard correctly stopped before installation. Derive the expected hash from the verified local artifact instead of transcribing it manually.
+
+## fa5844 · 2026-09-02T12:26:21.423Z — codex — gpt-5.6-sol
+
+- **Directory:** `/Users/safzan/Development/projects/codex-rudder`
+- **About:** `tmux`
+- **Tags:** `dx`
+
+While proving Rudder's live diff tab with --state-dir, the TUI still prioritized a globally registered active session. The expected checkout-specific diff pattern timed out even though the viewer rendered another workspace's real diff. Explicit state directories should be easier to select or prioritize during focused inspection.
+
+## 77ba5e · 2026-09-02T12:48:39.001Z — codex — gpt-5.6-sol
+
+- **Directory:** `/Users/safzan/Development/projects/codex-rudder`
+- **About:** `tmux`
+- **Tags:** `tooling`
+
+While replaying a Rudder tree click in a detached tmux PTY, tmux send-keys delivered the SGR mouse sequence as keyboard input instead of a mouse event. The pane capture could not validate mouse hit-testing; use a real attached client or a dedicated mouse-event harness for this proof.
+

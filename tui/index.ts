@@ -26,10 +26,12 @@ import {
   continuationRunArguments,
   contextualHelp,
   dashboardNavigation,
+  diffTreeWidthForPointer,
   discoverSessions,
   emptyPromptHint,
   filterSessions,
   formatTokenUsage,
+  gitDiffTree,
   initialViewState,
   idlePromptControlArguments,
   latestAgentUpdate,
@@ -39,6 +41,7 @@ import {
   parseArguments,
   parseChatTranscript,
   parseDejaHits,
+  parseGitDiff,
   parseModelCatalog,
   parseToolEventDetails,
   parseTraceActivities,
@@ -64,6 +67,8 @@ import {
   type Session,
   type ToolEventDetail,
   type TraceActivity,
+  type GitDiffLine,
+  type GitDiffTreeEntry,
   type TUILayout,
   type ViewState,
 } from "./core";
@@ -83,10 +88,107 @@ const ACTIVITY_HISTORY_LIMIT = 200;
 const OUTPUT_HISTORY_LINES = 1_000;
 const ARTIFACT_TAIL_BYTES = 1024 * 1024;
 const TOOL_OUTPUT_LINES = 40;
+const DIFF_MAX_BYTES = 2 * 1024 * 1024;
+const DIFF_REFRESH_MS = 1_000;
+const diffCache = new Map<
+  string,
+  { readAt: number; result: { content: string; error?: string } }
+>();
+
+async function readWorkspaceDiff(cwd: string): Promise<{
+  content: string;
+  error?: string;
+}> {
+  const cached = diffCache.get(cwd);
+  if (cached && Date.now() - cached.readAt < DIFF_REFRESH_MS)
+    return cached.result;
+
+  const run = async (arguments_: string[]): Promise<[string, number]> => {
+    const child = Bun.spawn(
+      [
+        "git",
+        "-C",
+        cwd,
+        "diff",
+        "--no-ext-diff",
+        "--no-color",
+        "--unified=3",
+        ...arguments_,
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    let truncated = false;
+    const stdoutPromise = (async () => {
+      const reader = child.stdout.getReader();
+      const decoder = new TextDecoder();
+      let size = 0;
+      let output = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const remaining = DIFF_MAX_BYTES - size;
+        if (value.byteLength > remaining) {
+          output += decoder.decode(value.subarray(0, Math.max(0, remaining)), {
+            stream: true,
+          });
+          truncated = true;
+          child.kill();
+          break;
+        }
+        size += value.byteLength;
+        output += decoder.decode(value, { stream: true });
+      }
+      output += decoder.decode();
+      if (truncated)
+        output += `\n\\ Diff truncated at ${DIFF_MAX_BYTES / 1024 / 1024} MiB`;
+      return output;
+    })();
+    const [stdout, stderr, exitCode] = await Promise.all([
+      stdoutPromise,
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    return [
+      exitCode === 0 || truncated ? stdout : stderr.trim(),
+      truncated ? 0 : exitCode,
+    ];
+  };
+
+  try {
+    const [headDiff, exitCode] = await run(["HEAD", "--"]);
+    if (exitCode === 0) {
+      const result = { content: headDiff };
+      diffCache.set(cwd, { readAt: Date.now(), result });
+      return result;
+    }
+    const [[staged, stagedExit], [unstaged, unstagedExit]] = await Promise.all([
+      run(["--cached", "--"]),
+      run(["--"]),
+    ]);
+    if (stagedExit === 0 && unstagedExit === 0) {
+      const result = {
+        content: [staged, unstaged].filter(Boolean).join("\n"),
+      };
+      diffCache.set(cwd, { readAt: Date.now(), result });
+      return result;
+    }
+    const result = {
+      content: "",
+      error: headDiff || "Git diff is unavailable.",
+    };
+    diffCache.set(cwd, { readAt: Date.now(), result });
+    return result;
+  } catch (error) {
+    const result = { content: "", error: errorMessage(error) };
+    diffCache.set(cwd, { readAt: Date.now(), result });
+    return result;
+  }
+}
 
 interface ActivityRow {
   id: string;
   activity?: TraceActivity;
+  diff?: GitDiffLine;
   detail?: ToolEventDetail;
   chat?: ChatEntry;
   text: string;
@@ -131,6 +233,7 @@ async function main(): Promise<void> {
       chat: "",
       trace: "",
       output: "",
+      diff: "",
     };
     let searchMode: SearchMode | undefined;
     let promptMode: PromptMode | undefined;
@@ -154,6 +257,10 @@ async function main(): Promise<void> {
     let previousRowCount = 0;
     let themePickerOpen = false;
     let themeBeforePicker = activeThemeName;
+    let diffTreeWidth = 30;
+    let diffDividerDragging = false;
+    let diffDividerHovered = false;
+    const collapsedDiffDirectories = new Set<string>();
 
     const sessionList = new SelectRenderable(renderer, {
       id: "sessions",
@@ -281,6 +388,10 @@ async function main(): Promise<void> {
       content: "output",
       fg: palette.dim,
     });
+    const diffTab = new TextRenderable(renderer, {
+      content: "diff",
+      fg: palette.dim,
+    });
     const tabsLeft = new BoxRenderable(renderer, {
       height: 1,
       flexDirection: "row",
@@ -289,6 +400,7 @@ async function main(): Promise<void> {
     tabsLeft.add(chatTab);
     tabsLeft.add(activityTab);
     tabsLeft.add(outputTab);
+    tabsLeft.add(diffTab);
     // Only speaks up when live-follow is paused; silence is the default.
     const followIndicator = new TextRenderable(renderer, {
       content: "",
@@ -310,6 +422,7 @@ async function main(): Promise<void> {
       width: "100%",
       flexGrow: 1,
       scrollY: true,
+      scrollX: true,
       stickyScroll: true,
       stickyStart: "bottom",
       viewportCulling: false,
@@ -320,6 +433,80 @@ async function main(): Promise<void> {
         },
       },
     });
+    const diffFileList = new SelectRenderable(renderer, {
+      id: "diff-files",
+      width: 30,
+      height: "100%",
+      flexShrink: 0,
+      options: [],
+      showDescription: false,
+      showScrollIndicator: true,
+      showSelectionIndicator: true,
+      backgroundColor: palette.panel,
+      focusedBackgroundColor: palette.panel,
+      textColor: palette.dim,
+      focusedTextColor: palette.text,
+      selectedBackgroundColor: palette.selected,
+      selectedTextColor: palette.accent,
+      visible: false,
+      renderAfter(buffer) {
+        const options = this.options;
+        const visibleItems = Math.max(1, Math.floor(this.height));
+        const selectedIndex = this.getSelectedIndex();
+        const scrollOffset = Math.max(
+          0,
+          Math.min(
+            selectedIndex - Math.floor(visibleItems / 2),
+            Math.max(0, options.length - visibleItems),
+          ),
+        );
+        const addition = parseColor(palette.success);
+        const deletion = parseColor(palette.danger);
+        const labelX = 3;
+        for (const [visibleIndex, option] of options
+          .slice(scrollOffset, scrollOffset + visibleItems)
+          .entries()) {
+          const entry = option.value as GitDiffTreeEntry | undefined;
+          const match = entry ? /(\+\d+) (−\d+)$/.exec(entry.label) : null;
+          if (!match) continue;
+          const countWidth = match[1].length + 1 + match[2].length;
+          const countX = Math.max(labelX, this.width - countWidth - 2);
+          buffer.drawText(match[1], countX, visibleIndex, addition);
+          buffer.drawText(
+            match[2],
+            countX + match[1].length + 1,
+            visibleIndex,
+            deletion,
+          );
+        }
+      },
+    });
+    const diffDivider = new BoxRenderable(renderer, {
+      id: "diff-divider",
+      width: 1,
+      height: "100%",
+      flexShrink: 0,
+      backgroundColor: palette.background,
+      visible: false,
+      renderAfter(buffer) {
+        const color = parseColor(
+          diffDividerDragging || diffDividerHovered
+            ? palette.accent
+            : palette.border,
+        );
+        for (let y = 0; y < this.height; y++)
+          buffer.drawText("│", 0, y, color);
+      },
+    });
+    const artifactBody = new BoxRenderable(renderer, {
+      width: "100%",
+      flexGrow: 1,
+      flexDirection: "row",
+      gap: 0,
+    });
+    artifactBody.add(diffFileList);
+    artifactBody.add(diffDivider);
+    artifactBody.add(artifactScroll);
     // Borderless main surface: the conversation floats on the background the
     // way opencode's does; the prompt input is the only framed element.
     const artifactPanel = new BoxRenderable(renderer, {
@@ -332,7 +519,7 @@ async function main(): Promise<void> {
       paddingTop: 0,
     });
     artifactPanel.add(tabsBar);
-    artifactPanel.add(artifactScroll);
+    artifactPanel.add(artifactBody);
 
     const rightColumn = new BoxRenderable(renderer, {
       width: layout === "beta" ? "100%" : undefined,
@@ -603,6 +790,7 @@ async function main(): Promise<void> {
     chatTab.onMouseDown = () => setArtifact("chat");
     activityTab.onMouseDown = () => setArtifact("trace");
     outputTab.onMouseDown = () => setArtifact("output");
+    diffTab.onMouseDown = () => setArtifact("diff");
     followIndicator.onMouseDown = () => resumeFollowing();
     promptPanel.onMouseDown = () => openPrompt("auto");
     sessionsPanel.onMouseDown = () => focusSessions();
@@ -639,6 +827,92 @@ async function main(): Promise<void> {
       focusArtifact();
       setTimeout(updateFollowFromPosition, 0);
     };
+    diffFileList.onMouseScroll = (event) => {
+      diffFileList.focus();
+      const steps = Math.max(1, Math.round(event.scroll?.delta ?? 1));
+      if (event.scroll?.direction === "up") diffFileList.moveUp(steps);
+      else if (event.scroll?.direction === "down") diffFileList.moveDown(steps);
+    };
+    diffDivider.onMouseOver = () => {
+      diffDividerHovered = true;
+      diffDivider.requestRender();
+    };
+    diffDivider.onMouseOut = () => {
+      diffDividerHovered = false;
+      diffDivider.requestRender();
+    };
+    const resizeDiffTree = (pointerX: number) => {
+      diffTreeWidth = diffTreeWidthForPointer(
+        pointerX,
+        artifactBody.x,
+        artifactBody.width,
+      );
+      diffFileList.width = diffTreeWidth;
+      diffDivider.requestRender();
+    };
+    const finishDiffTreeDrag = () => {
+      if (!diffDividerDragging) return;
+      diffDividerDragging = false;
+      diffDivider.requestRender();
+    };
+    diffDivider.onMouseDown = (event) => {
+      diffDividerDragging = true;
+      diffDivider.requestRender();
+      resizeDiffTree(event.x);
+      event.preventDefault();
+    };
+    artifactBody.onMouseDrag = (event) => {
+      if (diffDividerDragging) resizeDiffTree(event.x);
+    };
+    artifactBody.onMouseDragEnd = finishDiffTreeDrag;
+    artifactBody.onMouseUp = finishDiffTreeDrag;
+    diffFileList.onMouseDown = (event) => {
+      diffFileList.focus();
+      const options = diffFileList.options;
+      const visibleItems = Math.max(1, Math.floor(diffFileList.height));
+      const selectedIndex = diffFileList.getSelectedIndex();
+      const scrollOffset = Math.max(
+        0,
+        Math.min(
+          selectedIndex - Math.floor(visibleItems / 2),
+          Math.max(0, options.length - visibleItems),
+        ),
+      );
+      const clickedIndex =
+        scrollOffset + Math.floor(event.y - diffFileList.y);
+      if (clickedIndex >= 0 && clickedIndex < options.length) {
+        diffFileList.setSelectedIndex(clickedIndex);
+        activateDiffTreeEntry(options[clickedIndex]?.value, true);
+      }
+    };
+    diffFileList.on(SelectRenderableEvents.SELECTION_CHANGED, (_index, option) => {
+      activateDiffTreeEntry(option?.value, false);
+    });
+    diffFileList.on(SelectRenderableEvents.ITEM_SELECTED, (_index, option) => {
+      activateDiffTreeEntry(option?.value, true);
+    });
+    function activateDiffTreeEntry(value: unknown, toggleDirectory: boolean): void {
+      const entry = value as GitDiffTreeEntry | undefined;
+      if (!entry || view.artifact !== "diff") return;
+      if (entry.kind === "directory") {
+        if (!toggleDirectory) return;
+        if (collapsedDiffDirectories.has(entry.path))
+          collapsedDiffDirectories.delete(entry.path);
+        else collapsedDiffDirectories.add(entry.path);
+        updateDiffFileTree(entry.path);
+        return;
+      }
+      jumpToDiffRow(entry.rowIndex);
+    }
+    function jumpToDiffRow(rowIndex: unknown): void {
+      if (view.artifact !== "diff" || typeof rowIndex !== "number") return;
+      selectedRow = rowIndex;
+      artifactFollowing = false;
+      renderArtifactRows(true);
+      artifactScroll.stickyScroll = false;
+      artifactScroll.scrollTo({ x: 0, y: selectedRow });
+      updateChrome();
+    }
     renderer.on("resize", () => updateChrome());
     themePanel.onMouseDown = () => themePicker.focus();
 
@@ -911,6 +1185,14 @@ async function main(): Promise<void> {
       sessionList.selectedDescriptionColor = palette.text;
       sessionList.selectedBackgroundColor = palette.selected;
       sessionList.selectedTextColor = palette.accent;
+      diffFileList.backgroundColor = palette.panel;
+      diffFileList.focusedBackgroundColor = palette.panel;
+      diffFileList.textColor = palette.dim;
+      diffFileList.focusedTextColor = palette.text;
+      diffFileList.selectedBackgroundColor = palette.selected;
+      diffFileList.selectedTextColor = palette.accent;
+      diffDivider.backgroundColor = palette.background;
+      diffDivider.requestRender();
       sessionsPanel.borderColor = palette.border;
       sessionsPanel.focusedBorderColor = palette.accent;
       sessionsPanel.titleColor = palette.accent;
@@ -1016,7 +1298,10 @@ async function main(): Promise<void> {
       artifactKey = "";
       artifactSignature = "";
       selectedRow = -1;
-      artifactFollowing = true;
+      artifactFollowing = view.artifact !== "diff";
+      artifactScroll.stickyScroll = view.artifact !== "diff";
+      artifactScroll.stickyStart = view.artifact === "diff" ? "top" : "bottom";
+      artifactScroll.scrollTo({ x: 0, y: 0 });
       unseenRows = 0;
       previousRowCount = 0;
       expandedToolIDs = new Set();
@@ -1031,7 +1316,9 @@ async function main(): Promise<void> {
       searchInput.placeholder =
         searchMode === "sessions"
           ? "Filter project, thread, status, or model…"
-          : `Search ${view.artifact === "trace" ? "activity" : "output"}…`;
+          : `Search ${
+              view.artifact === "trace" ? "activity" : view.artifact
+            }…`;
       searchPanel.title =
         searchMode === "sessions"
           ? " Filter sessions · Enter keep · Esc clear "
@@ -1639,12 +1926,16 @@ async function main(): Promise<void> {
       }
       const artifactPath =
         view.artifact === "trace" ? session.tracePath : session.outputPath;
+      const diffResult =
+        view.artifact === "diff" && session.cwd
+          ? await readWorkspaceDiff(session.cwd)
+          : undefined;
       const [content, eventContent] = await Promise.all([
-        view.artifact === "chat"
-          ? ""
+        view.artifact === "chat" || view.artifact === "diff"
+          ? Promise.resolve("")
           : readTail(artifactPath, ARTIFACT_TAIL_BYTES),
-        view.artifact === "output"
-          ? ""
+        view.artifact === "output" || view.artifact === "diff"
+          ? Promise.resolve("")
           : readTail(session.eventsPath, ARTIFACT_TAIL_BYTES),
       ]);
       if (session.stateDir !== view.selectedStateDir) return;
@@ -1714,7 +2005,7 @@ async function main(): Promise<void> {
                 },
               ],
         );
-      } else {
+      } else if (view.artifact === "output") {
         const output = visibleArtifactTail(content, OUTPUT_HISTORY_LINES);
         const rows = output
           ? output.split("\n").map((line, index) => ({
@@ -1730,6 +2021,29 @@ async function main(): Promise<void> {
               },
             ];
         setArtifactRows(rows);
+      } else {
+        const lines = parseGitDiff(diffResult?.content ?? "");
+        const rows: ActivityRow[] = lines.map((diff, index) => ({
+          id: `diff:${index}:${diff.text}`,
+          diff,
+          text: diff.text,
+          copyText: diff.text,
+        }));
+        setArtifactRows(
+          rows.length > 0
+            ? rows
+            : [
+                {
+                  id: "empty",
+                  text:
+                    diffResult?.error ??
+                    (session.cwd
+                      ? "No tracked changes against HEAD."
+                      : "This session has no working directory."),
+                  copyText: "",
+                },
+              ],
+        );
       }
     }
 
@@ -1744,11 +2058,33 @@ async function main(): Promise<void> {
       if (!artifactFollowing && artifactSignature)
         unseenRows += Math.max(0, rows.length - previousRowCount);
       artifactRows = rows;
+      if (view.artifact === "diff") updateDiffFileTree();
       previousRowCount = rows.length;
       artifactSignature = nextSignature;
       if (selectedRow >= rows.length) selectedRow = rows.length - 1;
       renderArtifactRows(true);
       updateChrome();
+    }
+
+    function updateDiffFileTree(selectedPath?: string): void {
+      const entries = gitDiffTree(
+        artifactRows.flatMap((row) => (row.diff ? [row.diff] : [])),
+        collapsedDiffDirectories,
+      );
+      diffFileList.options = entries.map((entry) => ({
+        name:
+          entry.kind === "file"
+            ? entry.label.replace(/\+\d+ −\d+$/, "")
+            : entry.label,
+        description: "",
+        value: entry,
+      }));
+      if (selectedPath) {
+        const selectedIndex = entries.findIndex(
+          (entry) => entry.path === selectedPath,
+        );
+        if (selectedIndex >= 0) diffFileList.setSelectedIndex(selectedIndex);
+      }
     }
 
     function renderArtifactRows(preserveScroll: boolean): void {
@@ -1761,8 +2097,11 @@ async function main(): Promise<void> {
         const match = rowMatchesQuery(row);
         const renderable = new TextRenderable(renderer, {
           id: `artifact-row-${index}`,
-          width: "100%",
-          wrapMode: "word",
+          width:
+            view.artifact === "diff"
+              ? Math.max(artifactScroll.width, row.text.length + 4)
+              : "100%",
+          wrapMode: view.artifact === "diff" ? "none" : "word",
           content: renderArtifactRow(row, match, index === selectedRow),
           fg: palette.text,
           // Activity is a structured list: mouse gestures select/expand rows.
@@ -1782,6 +2121,8 @@ async function main(): Promise<void> {
         return renderable;
       });
       if (artifactFollowing) resumeFollowing(false);
+      else if (view.artifact === "diff" && !preserveScroll)
+        artifactScroll.scrollTo({ x: 0, y: 0 });
       else if (preserveScroll) artifactScroll.scrollTop = oldScrollTop;
     }
 
@@ -1798,6 +2139,33 @@ async function main(): Promise<void> {
           ...marker.chunks,
           ...renderChatEntry(row.chat).chunks,
         ]);
+      if (row.diff) {
+        const color =
+          row.diff.kind === "addition"
+            ? palette.success
+            : row.diff.kind === "deletion"
+              ? palette.danger
+              : row.diff.kind === "hunk"
+                ? palette.accent
+                : row.diff.kind === "file"
+                  ? palette.warning
+                  : row.diff.kind === "metadata"
+                    ? palette.dim
+                    : palette.text;
+        const displayText =
+          row.diff.kind === "file"
+            ? row.text.replace(/^diff --git a\/(.+) b\/(.+)$/, "▾ $2")
+            : row.text;
+        const styled =
+          row.diff.kind === "file"
+            ? bold(fg(color)(displayText))
+            : fg(color)(displayText);
+        return new StyledText([
+          ...selection.chunks,
+          ...marker.chunks,
+          ...t`${styled}`.chunks,
+        ]);
+      }
       if (view.artifact === "output" || !row.activity)
         return new StyledText([
           ...selection.chunks,
@@ -1945,13 +2313,17 @@ async function main(): Promise<void> {
         [chatTab, "chat"],
         [activityTab, "trace"],
         [outputTab, "output"],
+        [diffTab, "diff"],
       ];
       for (const [tab, artifact] of tabs) {
         const selected = view.artifact === artifact;
         tab.fg = selected ? palette.accent : palette.dim;
         tab.attributes = selected ? TextAttributes.BOLD : TextAttributes.NONE;
       }
-      followIndicator.content = artifactFollowing
+      diffFileList.visible = view.artifact === "diff" && renderer.width >= 100;
+      diffDivider.visible = diffFileList.visible;
+      diffFileList.width = diffTreeWidth;
+      followIndicator.content = view.artifact === "diff" || artifactFollowing
         ? ""
         : `paused${unseenRows > 0 ? ` · ${unseenRows} new` : ""} · End resumes`;
       const session = selectedSession();

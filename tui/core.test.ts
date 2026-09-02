@@ -7,6 +7,7 @@ import {
   AsyncTaskGate,
   attachToolDetails,
   discoverSessions,
+  diffTreeWidthForPointer,
   emptyPromptHint,
   compactSessionDetails,
   continuationRunArguments,
@@ -27,6 +28,7 @@ import {
   visibleArtifactTail,
   visibleSessions,
   formatTokenUsage,
+  gitDiffTree,
   promptModeForSession,
   promptTargetForSession,
   resolvePromptTarget,
@@ -36,6 +38,7 @@ import {
   parseDejaHits,
   parseChatTranscript,
   parseArguments,
+  parseGitDiff,
   sessionsPanelTitle,
   FALLBACK_MODELS,
   type Session,
@@ -250,6 +253,78 @@ describe("artifact and display helpers", () => {
   test("reserves native mouse text selection for the output pane", () => {
     expect(artifactAllowsTextSelection("trace")).toBe(false);
     expect(artifactAllowsTextSelection("output")).toBe(true);
+    expect(artifactAllowsTextSelection("diff")).toBe(true);
+  });
+
+  test("cycles through the live diff artifact", () => {
+    let state = initialViewState;
+    for (const artifact of ["trace", "output", "diff", "chat"] as const) {
+      state = reduceView(state, { type: "toggle-artifact" });
+      expect(state.artifact).toBe(artifact);
+    }
+  });
+
+  test("classifies unified Git diff lines for terminal styling", () => {
+    expect(
+      parseGitDiff(
+        [
+          "diff --git a/a.ts b/a.ts",
+          "index 123..456 100644",
+          "--- a/a.ts",
+          "+++ b/a.ts",
+          "@@ -1 +1 @@",
+          "-const oldValue = 1;",
+          "+const newValue = 2;",
+          " unchanged",
+        ].join("\n"),
+      ).map(({ kind }) => kind),
+    ).toEqual([
+      "file",
+      "metadata",
+      "metadata",
+      "metadata",
+      "hunk",
+      "deletion",
+      "addition",
+      "context",
+    ]);
+  });
+
+  test("builds a hierarchical changed-file tree with line counts", () => {
+    const tree = gitDiffTree(
+      parseGitDiff(
+        [
+          "diff --git a/src/api.ts b/src/api.ts",
+          "@@ -1 +1,2 @@",
+          "-old",
+          "+new",
+          "+next",
+          "diff --git a/src/ui/view.ts b/src/ui/view.ts",
+          "@@ -1 +1 @@",
+          "-before",
+          "+after",
+          "diff --git a/README.md b/README.md",
+          "+docs",
+        ].join("\n"),
+      ),
+    );
+    expect(tree).toEqual([
+      { label: "▾ 󰉋 src", rowIndex: 0, kind: "directory", path: "src", expanded: true },
+      { label: "    󰈔 api.ts  +2 −1", rowIndex: 0, kind: "file", path: "src/api.ts" },
+      { label: "  ▾ 󰉋 ui", rowIndex: 5, kind: "directory", path: "src/ui", expanded: true },
+      { label: "      󰈔 view.ts  +1 −1", rowIndex: 5, kind: "file", path: "src/ui/view.ts" },
+      { label: "  󰈔 README.md  +1 −0", rowIndex: 9, kind: "file", path: "README.md" },
+    ]);
+    expect(gitDiffTree(parseGitDiff("diff --git a/src/a.ts b/src/a.ts\n+a"), new Set(["src"]))).toEqual([
+      { label: "▸ 󰉋 src", rowIndex: 0, kind: "directory", path: "src", expanded: false },
+    ]);
+  });
+
+  test("clamps the draggable diff tree width", () => {
+    expect(diffTreeWidthForPointer(45, 10, 120)).toBe(35);
+    expect(diffTreeWidthForPointer(15, 10, 120)).toBe(20);
+    expect(diffTreeWidthForPointer(100, 10, 120)).toBe(60);
+    expect(diffTreeWidthForPointer(80, 10, 70)).toBe(30);
   });
 
   test("reads only complete lines from a bounded tail", async () => {
