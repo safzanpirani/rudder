@@ -29,3 +29,11 @@ jobs:
       - run: go build -o rudder .
       - run: bun test
       - run: bunx tsc -p tsconfig.json --noEmit
+      - name: Check the npm package contents
+        run: |
+          node -e 'require("./scripts/npm-binary.cjs")'
+          npm pack --dry-run 2>&1 | tee pack.log
+          grep -q 'tui/index.ts' pack.log
+          grep -q 'main.go' pack.log
+          ! grep -q 'core.test.ts' pack.log
+          ! grep -q 'runner_test.go' pack.log

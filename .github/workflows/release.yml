@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - { goos: darwin, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          ext=""
+          [ "$GOOS" = "windows" ] && ext=".exe"
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o "dist/rudder-${GOOS}-${GOARCH}${ext}" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rudder-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Verify the tag matches the declared version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          declared=$(sed -n 's/^const version = "\(.*\)"$/\1/p' main.go)
+          test "$tag" = "$declared" || { echo "tag v$tag does not match main.go version $declared"; exit 1; }
+      - name: Test
+        run: |
+          bun install --frozen-lockfile
+          go test ./...
+          bun test
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum rudder-* > checksums.txt
+          cat checksums.txt
+      - name: GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/rudder-*
+            dist/checksums.txt
+          generate_release_notes: true
+      - name: Prepare npm package
+        run: node scripts/npm-prepare.cjs "${GITHUB_REF_NAME#v}" dist/checksums.txt
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm pack --dry-run
+          npm publish --access public --provenance

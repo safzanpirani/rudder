@@ -79,6 +79,33 @@ Adding a provider means implementing one adapter behind the existing
 `--provider` flag. The state directory, control socket, steering commands, and
 TUI are provider-agnostic already.
 
+## Install
+
+The quickest route is the npm package, which ships the launcher, the TUI, and
+the provider adapters, and fetches the prebuilt `rudder` binary for your
+platform from the matching GitHub release at install time:
+
+```bash
+npm install -g ruddr
+# or
+bun add -g ruddr
+rudder --help
+```
+
+Prebuilt binaries cover macOS (Apple Silicon and Intel), Linux (x64 and
+arm64), and Windows x64. Every download is verified against the SHA-256
+checksums pinned inside the published package. On any other platform, or when
+the download is blocked, the launcher builds the bundled Go sources with a
+local Go 1.24 toolchain instead. Set `RUDDER_BINARY` to use a binary you built
+yourself, or `RUDDER_SKIP_DOWNLOAD=1` to skip the fetch and always build.
+
+The Codex provider needs only the binary. `rudder tui` and the Claude,
+OpenCode, and Pi providers also need Bun 1.4 or newer on `PATH`.
+
+Releases are cut by pushing a `vX.Y.Z` tag that matches the `version`
+constant in `main.go`. The workflow builds every platform, attaches the
+binaries and checksums to a GitHub release, and publishes the npm package.
+
 ## Build
 
 ```bash
