@@ -1430,6 +1430,7 @@ async function main(): Promise<void> {
         { id: "theme", label: "Change theme", key: "t", hint: "live preview" },
         { id: "refresh", label: "Refresh sessions", key: "r" },
         { id: "copy", label: "Copy selected row", key: "c" },
+        { id: "update", label: updateAvailable ? `Update Ruddr to ${updateAvailable}` : "Update Ruddr", hint: "runs ruddr update; restart the TUI afterwards", disabled: updateAvailable ? undefined : "no newer release found on the last daily check" },
         { id: "quit", label: "Quit", key: "q" },
       ];
     }
@@ -1490,6 +1491,7 @@ async function main(): Promise<void> {
         case "theme": openThemePicker(); break;
         case "refresh": void refresh("Refreshing sessions…"); break;
         case "copy": copyCurrentSelection(); break;
+        case "update": void runUpdate(); break;
         case "quit": void shutdown(); break;
       }
     }
@@ -2829,6 +2831,24 @@ async function main(): Promise<void> {
       return new StyledText(chunks);
     }
 
+    let updateAvailable = args.updateAvailable;
+    let updating = false;
+    async function runUpdate(): Promise<void> {
+      if (updating || !updateAvailable) return;
+      updating = true;
+      const target = updateAvailable;
+      setStatus(`Updating Ruddr to ${target}…`, "info");
+      try {
+        await runControl(args.ruddr, ["update"]);
+        updateAvailable = undefined;
+        setStatus(`Ruddr ${target} installed · quit and relaunch ruddr tui`, "success");
+      } catch (error) {
+        setStatus(`Update failed: ${errorMessage(error)}`, "error");
+      } finally {
+        updating = false;
+      }
+    }
+
     function setStatus(
       message: string,
       danger: boolean | StatusKind = false,
@@ -2867,7 +2887,13 @@ async function main(): Promise<void> {
         const glyph = liveCount > 0 ? spinnerFrame(animationTick) : "·";
         const refreshed =
           lastRefreshAt > 0 ? ` · refreshed ${formatSecondsAgo(lastRefreshAt, now)}` : "";
-        statusLine.content = t`${fg(liveCount > 0 ? palette.success : palette.dim)(glyph)} ${fg(palette.dim)(`${summary}${refreshed}`)}`;
+        const update = updateAvailable
+          ? t` ${fg(palette.dim)("·")} ${fg(palette.accent)(`v${updateAvailable} available`)}`.chunks
+          : [];
+        statusLine.content = new StyledText([
+          ...t`${fg(liveCount > 0 ? palette.success : palette.dim)(glyph)} ${fg(palette.dim)(`${summary}${refreshed}`)}`.chunks,
+          ...update,
+        ]);
         return;
       }
       const busy = actionRunning && statusState.message.endsWith("…");
@@ -2993,6 +3019,11 @@ async function main(): Promise<void> {
       }
     })();
     await refresh();
+    if (updateAvailable)
+      setStatus(
+        `Ruddr ${updateAvailable} is available · run ruddr update or pick Update Ruddr in the palette`,
+        "info",
+      );
     await done;
   } finally {
     if (!destroyed) renderer.destroy();

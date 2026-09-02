@@ -752,6 +752,16 @@ describe("artifact and display helpers", () => {
     expect(await readFile(join(decoy, "state.json"), "utf8")).toContain("other.run");
   });
 
+  test("reads the pending update from the launcher environment", () => {
+    expect(parseArguments(["--ruddr", "ruddr"], {}).updateAvailable).toBeUndefined();
+    expect(
+      parseArguments(["--ruddr", "ruddr"], { RUDDR_UPDATE_AVAILABLE: " 0.4.0 " }).updateAvailable,
+    ).toBe("0.4.0");
+    expect(
+      parseArguments(["--ruddr", "ruddr"], { RUDDR_UPDATE_AVAILABLE: "" }).updateAvailable,
+    ).toBeUndefined();
+  });
+
   test("switches to the mobile layout at the width threshold", () => {
     expect(layoutForWidth(120, DEFAULT_MOBILE_WIDTH_THRESHOLD, "classic")).toEqual({
       layout: "classic",

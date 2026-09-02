@@ -387,6 +387,8 @@ export interface TUIArguments {
   beta: boolean;
   /** Force the narrow single-column layout regardless of terminal width. */
   mobile: boolean;
+  /** A newer release the Ruddr binary found on its last daily check. */
+  updateAvailable?: string;
 }
 
 export interface ViewState {
@@ -427,6 +429,7 @@ export function parseArguments(
     (environment.RUDDR_TUI_BETA ?? environment.RUDDER_TUI_BETA) === "1";
   let mobile =
     (environment.RUDDR_TUI_MOBILE ?? environment.RUDDER_TUI_MOBILE) === "1";
+  const updateAvailable = environment.RUDDR_UPDATE_AVAILABLE?.trim() || undefined;
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index];
     const value = argv[index + 1];
@@ -463,7 +466,17 @@ export function parseArguments(
     throw new Error("--ruddr is required (launch the TUI through ruddr tui)");
   if (roots.length === 0 && stateDirs.length === 0)
     roots.push(join(process.cwd(), ".scratch"));
-  return { ruddr, roots, stateDirs, interval, includeAll, theme, beta, mobile };
+  return {
+    ruddr,
+    roots,
+    stateDirs,
+    interval,
+    includeAll,
+    theme,
+    beta,
+    mobile,
+    updateAvailable,
+  };
 }
 
 function parseInterval(value: string): number {

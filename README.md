@@ -109,6 +109,27 @@ yourself, or `RUDDR_SKIP_DOWNLOAD=1` to skip the fetch and always build.
 The Codex provider needs only the binary. `ruddr tui` and the Claude,
 OpenCode, and Pi providers also need Bun 1.4 or newer on `PATH`.
 
+### Updating
+
+```bash
+ruddr update --check   # report whether a newer release exists
+ruddr update           # install it
+```
+
+Ruddr looks up the latest GitHub release at most once a day, on `ruddr version`
+and in the background of `ruddr tui`, and caches the answer under
+`~/.local/state/ruddr/update-check.json`. When a newer release exists, `ruddr
+version` prints a notice, and the TUI shows a status toast, keeps the version
+in the idle status line, and offers **Update Ruddr** in the command palette.
+Set `RUDDR_NO_UPDATE_CHECK=1` to disable the check.
+
+`ruddr update` picks the install channel from where the binary lives: a global
+npm or bun package is reinstalled at the new version through that tool, a
+standalone binary is replaced in place after the download is verified against
+the release checksums, and a source checkout installed with
+`scripts/install-local.sh` is told to pull and rerun the installer, since its
+TUI assets live apart from the binary.
+
 Releases are cut by pushing a `vX.Y.Z` tag that matches the `version`
 constant in `main.go`. The workflow builds every platform, attaches the
 binaries and checksums to a GitHub release, and publishes the npm package.

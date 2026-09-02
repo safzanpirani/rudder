@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -38,6 +39,12 @@ func tuiCommand(args []string) error {
 		return fmt.Errorf("locate Ruddr executable: %w", err)
 	}
 	cmd := newTUIProcess(bunPath, entryPath, ruddrPath, args)
+	if latest, ok := availableUpdate(); ok {
+		cmd.Env = append(os.Environ(), updateAvailableEnvironment+"="+latest)
+	}
+	// Refresh the cached release check while the TUI runs; the next launch
+	// shows the result.
+	go refreshUpdateCheck(context.Background())
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

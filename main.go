@@ -60,8 +60,12 @@ func runCLIContext(ctx context.Context, args []string) error {
 		return interruptCommand(args[1:])
 	case "wait":
 		return waitCommand(args[1:])
+	case "update":
+		return updateCommand(args[1:])
 	case "version", "--version", "-version":
 		fmt.Println("ruddr", version)
+		refreshUpdateCheck(ctx)
+		printUpdateNotice()
 		return nil
 	case "help", "--help", "-h":
 		printUsage()
@@ -386,5 +390,10 @@ Usage:
   %[1]s peek --state-dir DIR [-n 25]
   %[1]s interrupt --state-dir DIR
   %[1]s wait --state-dir DIR [--timeout 10m]
+  %[1]s update [--check]                        (install the latest release)
+  %[1]s version
+
+Ruddr checks GitHub for a newer release at most once a day and mentions it in
+the TUI and after version; set RUDDR_NO_UPDATE_CHECK=1 to disable the check.
 `, name)
 }
