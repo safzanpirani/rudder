@@ -37,6 +37,7 @@ import {
   latestAgentUpdate,
   modelPickerOptions,
   newSessionRunArguments,
+  nextGitDiffBoundary,
   nextArtifact,
   parseArguments,
   parseChatTranscript,
@@ -76,7 +77,8 @@ import {
   defaultThemeName,
   findTheme,
   persistTheme,
-  readPersistedTheme,
+  persistTUIConfig,
+  readTUIConfig,
   resolveThemeName,
   themes,
   type ThemePalette,
@@ -203,9 +205,10 @@ type SearchMode = "sessions" | "artifact" | "deja";
 async function main(): Promise<void> {
   const args = parseArguments(Bun.argv.slice(2));
   const layout: TUILayout = args.beta ? "beta" : "classic";
+  const persistedConfig = await readTUIConfig();
   let activeThemeName = resolveThemeName(
     args.theme || process.env.RUDDER_TUI_THEME,
-    await readPersistedTheme(),
+    persistedConfig.theme,
   );
   palette = findTheme(activeThemeName)!.palette;
   const renderer = await createCliRenderer({
@@ -257,9 +260,14 @@ async function main(): Promise<void> {
     let previousRowCount = 0;
     let themePickerOpen = false;
     let themeBeforePicker = activeThemeName;
-    let diffTreeWidth = 30;
+    let diffTreeWidth = Math.max(
+      20,
+      Math.min(60, persistedConfig.diffTreeWidth ?? 30),
+    );
     let diffDividerDragging = false;
     let diffDividerHovered = false;
+    let diffNavigationPrefix: "[" | "]" | undefined;
+    let diffNavigationTimer: ReturnType<typeof setTimeout> | undefined;
     const collapsedDiffDirectories = new Set<string>();
 
     const sessionList = new SelectRenderable(renderer, {
@@ -471,6 +479,17 @@ async function main(): Promise<void> {
           if (!match) continue;
           const countWidth = match[1].length + 1 + match[2].length;
           const countX = Math.max(labelX, this.width - countWidth - 2);
+          if (entry?.status) {
+            const statusColor =
+              entry.status === "A"
+                ? addition
+                : entry.status === "D"
+                  ? deletion
+                  : parseColor(
+                      entry.status === "R" ? palette.warning : palette.accent,
+                    );
+            buffer.drawText(entry.status, Math.max(labelX, countX - 3), visibleIndex, statusColor);
+          }
           buffer.drawText(match[1], countX, visibleIndex, addition);
           buffer.drawText(
             match[2],
@@ -854,6 +873,13 @@ async function main(): Promise<void> {
       if (!diffDividerDragging) return;
       diffDividerDragging = false;
       diffDivider.requestRender();
+      void persistTUIConfig({
+        ...persistedConfig,
+        theme: activeThemeName,
+        diffTreeWidth,
+      }).catch((error) =>
+        setStatus(`Sidebar resized, but could not save: ${errorMessage(error)}`, true),
+      );
     };
     diffDivider.onMouseDown = (event) => {
       diffDividerDragging = true;
@@ -912,6 +938,28 @@ async function main(): Promise<void> {
       artifactScroll.stickyScroll = false;
       artifactScroll.scrollTo({ x: 0, y: selectedRow });
       updateChrome();
+    }
+
+    function moveToDiffBoundary(kind: "hunk" | "file", direction: number): void {
+      const lines = artifactRows.flatMap((row) => (row.diff ? [row.diff] : []));
+      const target = nextGitDiffBoundary(lines, selectedRow, kind, direction);
+      if (target === undefined) {
+        setStatus(`No diff ${kind}s`, true);
+        return;
+      }
+      jumpToDiffRow(target);
+      if (kind === "file") {
+        const optionIndex = diffFileList.options.findIndex(
+          (option) =>
+            (option.value as GitDiffTreeEntry | undefined)?.kind === "file" &&
+            (option.value as GitDiffTreeEntry).rowIndex === target,
+        );
+        if (optionIndex >= 0) diffFileList.setSelectedIndex(optionIndex);
+      }
+      const boundaries = lines.flatMap((line, index) =>
+        line.kind === kind ? [index] : [],
+      );
+      setStatus(`${kind === "hunk" ? "Hunk" : "File"} ${boundaries.indexOf(target) + 1} of ${boundaries.length}`);
     }
     renderer.on("resize", () => updateChrome());
     themePanel.onMouseDown = () => themePicker.focus();
@@ -1049,6 +1097,32 @@ async function main(): Promise<void> {
           void submitPrompt();
         }
         return;
+      }
+
+      if (view.focus === "artifact" && view.artifact === "diff") {
+        if (key.name === "[" || key.name === "]") {
+          key.preventDefault();
+          key.stopPropagation();
+          diffNavigationPrefix = key.name;
+          if (diffNavigationTimer) clearTimeout(diffNavigationTimer);
+          diffNavigationTimer = setTimeout(() => {
+            diffNavigationPrefix = undefined;
+          }, 1_200);
+          setStatus(`${key.name}c hunk · ${key.name}f file`);
+          return;
+        }
+        if (diffNavigationPrefix && (key.name === "c" || key.name === "f")) {
+          key.preventDefault();
+          key.stopPropagation();
+          const direction = diffNavigationPrefix === "]" ? 1 : -1;
+          const kind = key.name === "c" ? "hunk" : "file";
+          diffNavigationPrefix = undefined;
+          if (diffNavigationTimer) clearTimeout(diffNavigationTimer);
+          moveToDiffBoundary(kind, direction);
+          return;
+        }
+        diffNavigationPrefix = undefined;
+        if (diffNavigationTimer) clearTimeout(diffNavigationTimer);
       }
 
       const navigation = dashboardNavigation(layout, view.focus, key.name);
@@ -2074,7 +2148,7 @@ async function main(): Promise<void> {
       diffFileList.options = entries.map((entry) => ({
         name:
           entry.kind === "file"
-            ? entry.label.replace(/\+\d+ −\d+$/, "")
+            ? entry.label.replace(/[MADR]  \+\d+ −\d+$/, "")
             : entry.label,
         description: "",
         value: entry,

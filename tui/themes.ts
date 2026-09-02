@@ -23,6 +23,11 @@ export interface ThemeDefinition {
   palette: ThemePalette;
 }
 
+export interface TUIConfig {
+  theme?: string;
+  diffTreeWidth?: number;
+}
+
 export const defaultThemeName = "rudder";
 
 const rudderPalette: ThemePalette = {
@@ -105,20 +110,29 @@ function legacyThemeConfigPath(environment = process.env): string {
 }
 
 export async function readPersistedTheme(
-	configFile?: string,
+  configFile?: string,
 ): Promise<string | undefined> {
-	const selectedPath = configFile ?? themeConfigPath();
-	try {
-		const parsed = JSON.parse(await readFile(selectedPath, "utf8")) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
-    const value = Reflect.get(parsed, "theme");
-    return typeof value === "string" ? value : undefined;
+  return (await readTUIConfig(configFile)).theme;
+}
+
+export async function readTUIConfig(configFile?: string): Promise<TUIConfig> {
+  const selectedPath = configFile ?? themeConfigPath();
+  try {
+    const parsed = JSON.parse(await readFile(selectedPath, "utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const theme = Reflect.get(parsed, "theme");
+    const diffTreeWidth = Reflect.get(parsed, "diffTreeWidth");
+    return {
+      ...(typeof theme === "string" ? { theme } : {}),
+      ...(typeof diffTreeWidth === "number" && Number.isFinite(diffTreeWidth)
+        ? { diffTreeWidth }
+        : {}),
+    };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-		if (code === "ENOENT" && configFile === undefined) {
-			return readPersistedTheme(legacyThemeConfigPath());
-		}
-		if (code === "ENOENT" || error instanceof SyntaxError) return;
+    if (code === "ENOENT" && configFile === undefined)
+      return readTUIConfig(legacyThemeConfigPath());
+    if (code === "ENOENT" || error instanceof SyntaxError) return {};
     throw error;
   }
 }
@@ -128,11 +142,18 @@ export async function persistTheme(
   configFile = themeConfigPath(),
 ): Promise<void> {
   if (!findTheme(name)) throw new Error(`unknown TUI theme ${name}`);
+  await persistTUIConfig({ ...(await readTUIConfig(configFile)), theme: name }, configFile);
+}
+
+export async function persistTUIConfig(
+  config: TUIConfig,
+  configFile = themeConfigPath(),
+): Promise<void> {
   const directory = dirname(configFile);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
   const temporary = `${configFile}.${process.pid}.tmp`;
-  await writeFile(temporary, `${JSON.stringify({ theme: name }, null, 2)}\n`, {
+  await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, {
     mode: 0o600,
   });
   await chmod(temporary, 0o600);

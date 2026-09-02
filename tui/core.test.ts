@@ -35,6 +35,7 @@ import {
   modelPickerOptions,
   parseModelCatalog,
   newSessionRunArguments,
+  nextGitDiffBoundary,
   parseDejaHits,
   parseChatTranscript,
   parseArguments,
@@ -310,14 +311,35 @@ describe("artifact and display helpers", () => {
     );
     expect(tree).toEqual([
       { label: "▾ 󰉋 src", rowIndex: 0, kind: "directory", path: "src", expanded: true },
-      { label: "    󰈔 api.ts  +2 −1", rowIndex: 0, kind: "file", path: "src/api.ts" },
+      { label: "    󰈔 api.ts  M  +2 −1", rowIndex: 0, kind: "file", path: "src/api.ts", status: "M" },
       { label: "  ▾ 󰉋 ui", rowIndex: 5, kind: "directory", path: "src/ui", expanded: true },
-      { label: "      󰈔 view.ts  +1 −1", rowIndex: 5, kind: "file", path: "src/ui/view.ts" },
-      { label: "  󰈔 README.md  +1 −0", rowIndex: 9, kind: "file", path: "README.md" },
+      { label: "      󰈔 view.ts  M  +1 −1", rowIndex: 5, kind: "file", path: "src/ui/view.ts", status: "M" },
+      { label: "  󰈔 README.md  M  +1 −0", rowIndex: 9, kind: "file", path: "README.md", status: "M" },
     ]);
     expect(gitDiffTree(parseGitDiff("diff --git a/src/a.ts b/src/a.ts\n+a"), new Set(["src"]))).toEqual([
       { label: "▸ 󰉋 src", rowIndex: 0, kind: "directory", path: "src", expanded: false },
     ]);
+    expect(
+      gitDiffTree(
+        parseGitDiff(
+          "diff --git a/new.ts b/new.ts\nnew file mode 100644\n+new\n" +
+            "diff --git a/old.ts b/old.ts\ndeleted file mode 100644\n-old",
+        ),
+      ).filter((entry) => entry.kind === "file").map((entry) => entry.status),
+    ).toEqual(["A", "D"]);
+  });
+
+  test("wraps diff navigation across hunks and files", () => {
+    const lines = parseGitDiff(
+      "diff --git a/a.ts b/a.ts\n@@ -1 +1 @@\n-old\n+new\n" +
+        "@@ -5 +5 @@\n-old\n+new\n" +
+        "diff --git a/b.ts b/b.ts\n@@ -1 +1 @@",
+    );
+    expect(nextGitDiffBoundary(lines, -1, "hunk", 1)).toBe(1);
+    expect(nextGitDiffBoundary(lines, 1, "hunk", 1)).toBe(4);
+    expect(nextGitDiffBoundary(lines, 8, "hunk", 1)).toBe(1);
+    expect(nextGitDiffBoundary(lines, 4, "file", -1)).toBe(0);
+    expect(nextGitDiffBoundary(lines, 0, "file", -1)).toBe(7);
   });
 
   test("clamps the draggable diff tree width", () => {

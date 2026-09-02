@@ -101,6 +101,7 @@ export interface GitDiffTreeEntry {
   kind: "directory" | "file";
   path: string;
   expanded?: boolean;
+  status?: "M" | "A" | "D" | "R";
 }
 
 export function diffTreeWidthForPointer(
@@ -140,6 +141,24 @@ export function parseGitDiff(content: string): GitDiffLine[] {
   });
 }
 
+export function nextGitDiffBoundary(
+  lines: GitDiffLine[],
+  selectedRow: number,
+  kind: "hunk" | "file",
+  direction: number,
+): number | undefined {
+  const boundaries = lines.flatMap((line, index) =>
+    line.kind === kind ? [index] : [],
+  );
+  if (boundaries.length === 0) return;
+  if (direction > 0)
+    return boundaries.find((index) => index > selectedRow) ?? boundaries[0];
+  return (
+    [...boundaries].reverse().find((index) => index < selectedRow) ??
+    boundaries[boundaries.length - 1]
+  );
+}
+
 export function gitDiffTree(
   lines: GitDiffLine[],
   collapsedDirectories: ReadonlySet<string> = new Set(),
@@ -149,6 +168,7 @@ export function gitDiffTree(
     rowIndex: number;
     additions: number;
     deletions: number;
+    status: "M" | "A" | "D" | "R";
   }> = [];
   let current: (typeof files)[number] | undefined;
   for (const [rowIndex, line] of lines.entries()) {
@@ -157,9 +177,15 @@ export function gitDiffTree(
         line.text,
       );
       const path = match?.[2] ?? line.text.replace(/^diff --git /, "");
-      current = { path, rowIndex, additions: 0, deletions: 0 };
+      current = { path, rowIndex, additions: 0, deletions: 0, status: "M" };
       files.push(current);
-    } else if (current && line.kind === "addition") current.additions++;
+    } else if (current && line.text.startsWith("new file mode "))
+      current.status = "A";
+    else if (current && line.text.startsWith("deleted file mode "))
+      current.status = "D";
+    else if (current && line.text.startsWith("rename from "))
+      current.status = "R";
+    else if (current && line.kind === "addition") current.additions++;
     else if (current && line.kind === "deletion") current.deletions++;
   }
 
@@ -190,10 +216,11 @@ export function gitDiffTree(
     const depth = parts.length - 1;
     const counts = `+${file.additions} −${file.deletions}`;
     entries.push({
-      label: `${"  ".repeat(depth)}  󰈔 ${parts[depth]}  ${counts}`,
+      label: `${"  ".repeat(depth)}  󰈔 ${parts[depth]}  ${file.status}  ${counts}`,
       rowIndex: file.rowIndex,
       kind: "file",
       path: file.path,
+      status: file.status,
     });
   }
   return entries;

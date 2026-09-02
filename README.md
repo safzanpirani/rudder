@@ -330,7 +330,10 @@ Activity, Output, and Diff are clickable tabs (`o` cycles). Diff shows the
 selected session's tracked staged and unstaged working-tree changes against
 `HEAD` and refreshes while the TUI runs. Wide terminals also show a changed-file
 tree with per-file line counts; selecting a file jumps to its patch. Drag the
-divider beside the tree to reveal long paths or give the patch more room. Both panes support
+divider beside the tree to reveal long paths or give the patch more room; Rudder
+remembers that width across launches. File status letters distinguish modified,
+added, deleted, and renamed paths. Use `]c` and `[c` to move between hunks, or
+`]f` and `[f` to move between files. Both panes support
 mouse-wheel scrolling, `/` search with `n`/`N` match navigation, and `c` to copy
 the selected row. In Activity, clicking selects a row and clicking a tool row
 expands it; use the Output tab for normal mouse text selection. Enter also

@@ -6,7 +6,9 @@ import {
   defaultThemeName,
   findTheme,
   persistTheme,
+  persistTUIConfig,
   readPersistedTheme,
+  readTUIConfig,
   resolveThemeName,
   themes,
 } from "./themes";
@@ -39,8 +41,17 @@ describe("TUI themes", () => {
   test("persists a private global preference and tolerates invalid JSON", async () => {
     const root = await mkdtemp(join(tmpdir(), "rudder-tui-theme-"));
     const configFile = join(root, "nested", "tui.json");
-    await persistTheme("nord", configFile);
+    await persistTUIConfig({ theme: "nord", diffTreeWidth: 42 }, configFile);
     expect(await readPersistedTheme(configFile)).toBe("nord");
+    expect(await readTUIConfig(configFile)).toEqual({
+      theme: "nord",
+      diffTreeWidth: 42,
+    });
+    await persistTheme("dracula", configFile);
+    expect(await readTUIConfig(configFile)).toEqual({
+      theme: "dracula",
+      diffTreeWidth: 42,
+    });
     expect((await stat(join(root, "nested"))).mode & 0o777).toBe(0o700);
     expect((await stat(configFile)).mode & 0o777).toBe(0o600);
 
