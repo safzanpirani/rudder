@@ -1107,6 +1107,7 @@ export const FALLBACK_MODELS: ModelInfo[] = [
   { provider: "codex", id: "gpt-5.6-sol", label: "GPT-5.6-Sol", default: true, available: true },
   { provider: "codex", id: "gpt-5.6-terra", label: "GPT-5.6-Terra", available: true },
   { provider: "codex", id: "gpt-5.6-luna", label: "GPT-5.6-Luna", available: true },
+  { provider: "claude", id: "claude-fable-5-1", label: "Claude Fable 5.1", available: true },
   { provider: "claude", id: "claude-fable-5", label: "Claude Fable 5", available: true },
   { provider: "claude", id: "claude-opus-5", label: "Claude Opus 5", default: true, available: true },
   { provider: "claude", id: "claude-sonnet-5", label: "Claude Sonnet 5", available: true },

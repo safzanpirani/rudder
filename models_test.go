@@ -10,6 +10,7 @@ func TestModelCatalogDefaults(t *testing.T) {
 		t.Fatalf("claude default = %q", got)
 	}
 	defaults := map[string]int{}
+	sawClaudeFable51 := false
 	sawOpencode := false
 	sawPi := false
 	for _, model := range modelCatalog {
@@ -18,6 +19,9 @@ func TestModelCatalogDefaults(t *testing.T) {
 		}
 		if model.Available && model.ID == "" {
 			t.Fatalf("available model without id: %#v", model)
+		}
+		if model.Provider == providerClaude && model.ID == "claude-fable-5-1" {
+			sawClaudeFable51 = model.Available
 		}
 		if model.Provider == "opencode" {
 			sawOpencode = true
@@ -40,5 +44,8 @@ func TestModelCatalogDefaults(t *testing.T) {
 	}
 	if !sawOpencode || !sawPi {
 		t.Fatal("catalog is missing an external provider")
+	}
+	if !sawClaudeFable51 {
+		t.Fatal("catalog is missing Claude Fable 5.1")
 	}
 }

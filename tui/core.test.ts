@@ -784,8 +784,11 @@ describe("promptable TUI helpers", () => {
     const options = modelPickerOptions(FALLBACK_MODELS);
     expect(options[0].value).toBe("codex/gpt-5.6-sol");
     expect(options[0].name).toContain("*");
+    const fable51 = options.find((option) => option.value === "claude/claude-fable-5-1");
     const opencode = options.find((option) => option.model.provider === "opencode");
     const pi = options.find((option) => option.model.provider === "pi");
+    expect(fable51?.name).toBe("Claude Fable 5.1");
+    expect(fable51?.disabled).toBe(false);
     expect(opencode?.disabled).toBe(false);
     expect(pi?.disabled).toBe(false);
     expect(pi?.model.efforts).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);

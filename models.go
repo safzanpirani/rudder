@@ -25,6 +25,7 @@ var modelCatalog = []providerModel{
 	{Provider: providerCodex, ID: "gpt-5.6-sol", Label: "GPT-5.6-Sol", Efforts: codexEfforts, Default: true, Available: true},
 	{Provider: providerCodex, ID: "gpt-5.6-terra", Label: "GPT-5.6-Terra", Efforts: codexEfforts, Available: true},
 	{Provider: providerCodex, ID: "gpt-5.6-luna", Label: "GPT-5.6-Luna", Efforts: codexEfforts, Available: true},
+	{Provider: providerClaude, ID: "claude-fable-5-1", Label: "Claude Fable 5.1", Available: true},
 	{Provider: providerClaude, ID: "claude-fable-5", Label: "Claude Fable 5", Available: true},
 	{Provider: providerClaude, ID: "claude-opus-5", Label: "Claude Opus 5", Default: true, Available: true},
 	{Provider: providerClaude, ID: "claude-sonnet-5", Label: "Claude Sonnet 5", Available: true},
