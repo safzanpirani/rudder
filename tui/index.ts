@@ -13,10 +13,11 @@ import {
   SelectRenderableEvents,
   StyledText,
   t,
+  TextareaRenderable,
   TextRenderable,
   underline,
 } from "@opentui/core";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -24,7 +25,16 @@ import {
   AsyncTaskGate,
   attachToolDetails,
   blendHex,
+  contextMeter,
+  diffTreeWidthForRatio,
+  filetypeForPath,
+  filterPaletteCommands,
   formatElapsed,
+  highlightCode,
+  nextDiffPollDelay,
+  parseMarkdown,
+  renderMeter,
+  typewriterReveal,
   gitDiffFileStats,
   gitDiffGutterWidth,
   gitDiffSummary,
@@ -80,7 +90,11 @@ import {
   type Session,
   type ToolEventDetail,
   type TraceActivity,
+  type CodeToken,
   type GitDiffFileStats,
+  type InlineSpan,
+  type MarkdownLine,
+  type PaletteCommand,
   type GitDiffLine,
   type GitDiffSummary,
   type GitDiffTreeEntry,
@@ -109,16 +123,25 @@ const DIFF_MAX_BYTES = 2 * 1024 * 1024;
 const DIFF_REFRESH_MS = 1_000;
 const diffCache = new Map<
   string,
-  { readAt: number; result: { content: string; error?: string } }
+  { readAt: number; delay: number; result: { content: string; error?: string } }
 >();
 
-async function readWorkspaceDiff(cwd: string): Promise<{
-  content: string;
-  error?: string;
-}> {
+async function readWorkspaceDiff(
+  cwd: string,
+  force = false,
+): Promise<{ content: string; error?: string }> {
   const cached = diffCache.get(cwd);
-  if (cached && Date.now() - cached.readAt < DIFF_REFRESH_MS)
+  if (cached && !force && Date.now() - cached.readAt < cached.delay)
     return cached.result;
+  const remember = (result: { content: string; error?: string }) => {
+    const changed = !cached || cached.result.content !== result.content;
+    diffCache.set(cwd, {
+      readAt: Date.now(),
+      delay: nextDiffPollDelay(cached?.delay ?? DIFF_REFRESH_MS, changed),
+      result,
+    });
+    return result;
+  };
 
   const run = async (arguments_: string[]): Promise<[string, number]> => {
     const child = Bun.spawn(
@@ -173,33 +196,44 @@ async function readWorkspaceDiff(cwd: string): Promise<{
 
   try {
     const [headDiff, exitCode] = await run(["HEAD", "--"]);
-    if (exitCode === 0) {
-      const result = { content: headDiff };
-      diffCache.set(cwd, { readAt: Date.now(), result });
-      return result;
-    }
+    if (exitCode === 0) return remember({ content: headDiff });
     const [[staged, stagedExit], [unstaged, unstagedExit]] = await Promise.all([
       run(["--cached", "--"]),
       run(["--"]),
     ]);
-    if (stagedExit === 0 && unstagedExit === 0) {
-      const result = {
+    if (stagedExit === 0 && unstagedExit === 0)
+      return remember({
         content: [staged, unstaged].filter(Boolean).join("\n"),
-      };
-      diffCache.set(cwd, { readAt: Date.now(), result });
-      return result;
-    }
-    const result = {
+      });
+    return remember({
       content: "",
       error: headDiff || "Git diff is unavailable.",
-    };
-    diffCache.set(cwd, { readAt: Date.now(), result });
-    return result;
+    });
   } catch (error) {
-    const result = { content: "", error: errorMessage(error) };
-    diffCache.set(cwd, { readAt: Date.now(), result });
-    return result;
+    return remember({ content: "", error: errorMessage(error) });
   }
+}
+
+/** Files whose mtime is at or after the session start: the session's edits. */
+async function touchedSince(
+  cwd: string,
+  paths: Iterable<string>,
+  startedAt: string | undefined,
+): Promise<Set<string>> {
+  const since = Date.parse(startedAt ?? "");
+  const touched = new Set<string>();
+  if (!Number.isFinite(since)) return touched;
+  await Promise.all(
+    [...paths].map(async (path) => {
+      try {
+        const info = await stat(join(cwd, path));
+        if (info.mtimeMs >= since - 1_000) touched.add(path);
+      } catch {
+        // Deleted or unreadable files stay unmarked.
+      }
+    }),
+  );
+  return touched;
 }
 
 interface ActivityRow {
@@ -212,6 +246,8 @@ interface ActivityRow {
   chat?: ChatEntry;
   /** Animated "working" row appended while the selected session is active. */
   live?: boolean;
+  /** Clickable rows (empty states, retry hints) run this on click or Enter. */
+  action?: () => void;
   text: string;
   copyText: string;
 }
@@ -317,6 +353,12 @@ async function main(): Promise<void> {
     let diffFileStats = new Map<string, GitDiffFileStats>();
     let diffGutterWidth = 2;
     let diffError: string | undefined;
+    let diffTouchedPaths = new Set<string>();
+    let diffTouchedSignature = "";
+    let diffTreeRatio: number | undefined = persistedConfig.diffTreeRatio;
+    // Typewriter reveal for the newest agent message while a session works.
+    let stream: { id: string; revealed: number; target: number } | undefined;
+    const seenAgentLength = new Map<string, number>();
     let animationTick = 0;
     let statusState: { message: string; kind: StatusKind; idle: boolean } = {
       message: "",
@@ -361,30 +403,28 @@ async function main(): Promise<void> {
         const danger = parseColor(palette.danger);
         const labelX = 3;
 
+        const dimColor = parseColor(palette.dim);
         for (const [visibleIndex, session] of sessions
           .slice(scrollOffset, scrollOffset + visibleItems)
           .entries()) {
-          const group = isLive(session) ? "LIVE" : "RECENT";
+          const index = scrollOffset + visibleIndex;
+          const live = isLive(session);
+          const previous = sessions[index - 1];
+          const firstOfGroup = !previous || isLive(previous) !== live;
           const statusColor =
             session.status === "active" || session.status === "completed"
               ? success
-              : session.status === "starting"
+              : session.status === "starting" || session.status === "idle"
                 ? warning
                 : danger;
           const rowY = visibleIndex * linesPerItem;
           const provider = session.provider ?? "codex";
 
           buffer.drawText(
-            group,
-            labelX,
-            rowY,
-            isLive(session) ? success : accent,
-          );
-          buffer.drawText(
             session.status === "active" || session.status === "starting"
               ? spinnerFrame(animationTick)
               : statusGlyph(session.status),
-            labelX + group.length + 2,
+            labelX,
             rowY,
             statusColor,
           );
@@ -395,6 +435,13 @@ async function main(): Promise<void> {
             rowY + 1,
             statusColor,
           );
+          if (firstOfGroup) {
+            const tag = live ? "LIVE" : "RECENT";
+            const age = sessionLabel(session).split("  ").pop() ?? "";
+            const tagX =
+              labelX + sessionCardInnerWidth() - [...age].length - 1 - tag.length - 1;
+            buffer.drawText(tag, Math.max(labelX, tagX), rowY, live ? success : dimColor);
+          }
         }
       },
     });
@@ -554,6 +601,10 @@ async function main(): Promise<void> {
           const entry = option.value as GitDiffTreeEntry | undefined;
           const match = entry ? /(\+\d+) (−\d+)$/.exec(entry.label) : null;
           if (!match) continue;
+          if (entry && diffTouchedPaths.has(entry.path)) {
+            const indent = /^\s*/.exec(entry.label)?.[0].length ?? 0;
+            buffer.drawText("●", labelX + indent, visibleIndex, parseColor(palette.accent));
+          }
           const countWidth = match[1].length + 1 + match[2].length;
           const countX = Math.max(labelX, this.width - countWidth - 2);
           if (entry?.status) {
@@ -752,19 +803,34 @@ async function main(): Promise<void> {
     });
     searchPanel.add(searchInput);
 
-    const promptInput = new InputRenderable(renderer, {
+    const PROMPT_MIN_ROWS = 1;
+    const PROMPT_MAX_ROWS = 6;
+    const promptInput = new TextareaRenderable(renderer, {
       id: "prompt-input",
       width: "100%",
+      height: PROMPT_MIN_ROWS,
       placeholder: "Message for the selected provider…",
       backgroundColor: palette.panel,
       focusedBackgroundColor: palette.selected,
       textColor: palette.text,
       focusedTextColor: palette.text,
       placeholderColor: palette.dim,
+      cursorColor: palette.accent,
+      wrapMode: "word",
+      keyBindings: [
+        { name: "return", action: "submit" },
+        { name: "return", shift: true, action: "newline" },
+        { name: "return", meta: true, action: "newline" },
+        { name: "j", ctrl: true, action: "newline" },
+      ],
+      onSubmit: () => {
+        if (promptMode) void submitPrompt();
+      },
+      onContentChange: () => fitPromptHeight(),
     });
     const promptPanel = new BoxRenderable(renderer, {
       width: "100%",
-      height: 3,
+      height: PROMPT_MIN_ROWS + 2,
       border: true,
       borderStyle: "rounded",
       borderColor: palette.border,
@@ -774,6 +840,66 @@ async function main(): Promise<void> {
       backgroundColor: palette.background,
     });
     promptPanel.add(promptInput);
+    function fitPromptHeight(): void {
+      const rows = Math.max(
+        PROMPT_MIN_ROWS,
+        Math.min(PROMPT_MAX_ROWS, promptInput.lineCount || 1),
+      );
+      if (promptInput.height !== rows) {
+        promptInput.height = rows;
+        promptPanel.height = rows + 2;
+      }
+    }
+
+    // Command palette: every action, searchable, with its key beside it.
+    const paletteInput = new InputRenderable(renderer, {
+      id: "palette-input",
+      width: "100%",
+      placeholder: "Type a command…",
+      backgroundColor: palette.panel,
+      focusedBackgroundColor: palette.selected,
+      textColor: palette.text,
+      focusedTextColor: palette.text,
+      placeholderColor: palette.dim,
+    });
+    const paletteList = new SelectRenderable(renderer, {
+      id: "palette-list",
+      width: "100%",
+      flexGrow: 1,
+      options: [],
+      showDescription: true,
+      wrapSelection: true,
+      backgroundColor: palette.background,
+      focusedBackgroundColor: palette.background,
+      textColor: palette.text,
+      focusedTextColor: palette.text,
+      descriptionColor: palette.dim,
+      selectedDescriptionColor: palette.text,
+      selectedBackgroundColor: palette.selected,
+      selectedTextColor: palette.accent,
+      showScrollIndicator: true,
+    });
+    const palettePanel = new BoxRenderable(renderer, {
+      position: "absolute",
+      left: "22%",
+      top: "12%",
+      width: "56%",
+      height: "70%",
+      zIndex: 25,
+      border: true,
+      borderStyle: "rounded",
+      borderColor: palette.accent,
+      title: " Commands · Enter run · Esc close ",
+      padding: 1,
+      gap: 1,
+      flexDirection: "column",
+      backgroundColor: palette.background,
+      visible: false,
+    });
+    palettePanel.add(paletteInput);
+    palettePanel.add(paletteList);
+    let paletteOpen = false;
+    let paletteCommands: PaletteCommand[] = [];
 
     const modelPicker = new SelectRenderable(renderer, {
       id: "model-picker",
@@ -896,6 +1022,7 @@ async function main(): Promise<void> {
     root.add(footerBar);
     if (layout === "beta") root.add(sessionsPanel);
     root.add(searchPanel);
+    root.add(palettePanel);
     root.add(themePanel);
     root.add(modelPanel);
     root.add(dejaPanel);
@@ -911,6 +1038,13 @@ async function main(): Promise<void> {
     promptPanel.onMouseDown = () => openPrompt("auto");
     sessionsPanel.onMouseDown = () => focusSessions();
     modelPanel.onMouseDown = () => modelPicker.focus();
+    palettePanel.onMouseDown = () => paletteInput.focus();
+    paletteInput.on(InputRenderableEvents.INPUT, (value: string) => {
+      if (paletteOpen) fillPalette(value);
+    });
+    paletteList.on(SelectRenderableEvents.ITEM_SELECTED, () => {
+      if (paletteOpen) runPaletteSelection();
+    });
     dejaPanel.onMouseDown = () => dejaPicker.focus();
     sessionList.onMouseScroll = (event) => {
       focusSessions();
@@ -971,10 +1105,14 @@ async function main(): Promise<void> {
       if (!diffDividerDragging) return;
       diffDividerDragging = false;
       diffDivider.requestRender();
+      if (artifactBody.width > 0) diffTreeRatio = diffTreeWidth / artifactBody.width;
+      persistedConfig.diffTreeRatio = diffTreeRatio;
+      persistedConfig.diffTreeWidth = diffTreeWidth;
       void persistTUIConfig({
         ...persistedConfig,
         theme: activeThemeName,
         diffTreeWidth,
+        ...(diffTreeRatio !== undefined ? { diffTreeRatio } : {}),
       }).catch((error) =>
         setStatus(`Sidebar resized, but could not save: ${errorMessage(error)}`, true),
       );
@@ -1110,7 +1248,11 @@ async function main(): Promise<void> {
       updateDiffFileTree();
       setStatus(foldAll ? "Folded every file" : "Unfolded every file");
     }
-    renderer.on("resize", () => updateChrome());
+    renderer.on("resize", () => {
+      updateChrome();
+      if (view.artifact !== "diff") applySessionFilter();
+      renderArtifactRows(true);
+    });
     themePanel.onMouseDown = () => themePicker.focus();
 
     themePicker.on(
@@ -1163,6 +1305,32 @@ async function main(): Promise<void> {
         key.preventDefault();
         key.stopPropagation();
         void shutdown();
+        return;
+      }
+      if (paletteOpen) {
+        if (key.name === "escape") {
+          key.preventDefault();
+          key.stopPropagation();
+          closePalette();
+        } else if (key.name === "return" || key.name === "enter") {
+          key.preventDefault();
+          key.stopPropagation();
+          runPaletteSelection();
+        } else if (key.name === "up" || (key.ctrl && key.name === "p")) {
+          key.preventDefault();
+          key.stopPropagation();
+          paletteList.moveUp(1);
+        } else if (key.name === "down" || (key.ctrl && key.name === "n")) {
+          key.preventDefault();
+          key.stopPropagation();
+          paletteList.moveDown(1);
+        }
+        return;
+      }
+      if (key.ctrl && key.name === "k") {
+        key.preventDefault();
+        key.stopPropagation();
+        if (!promptMode && !searchMode) openPalette();
         return;
       }
       if (themePickerOpen) {
@@ -1236,14 +1404,12 @@ async function main(): Promise<void> {
         return;
       }
       if (promptMode) {
+        // Enter submits through the textarea's own binding; Shift/Alt+Enter
+        // and Ctrl+J insert newlines there, so only Escape is handled here.
         if (key.name === "escape") {
           key.preventDefault();
           key.stopPropagation();
           closePrompt();
-        } else if (key.name === "return" || key.name === "enter") {
-          key.preventDefault();
-          key.stopPropagation();
-          void submitPrompt();
         }
         return;
       }
@@ -1314,6 +1480,8 @@ async function main(): Promise<void> {
           "enter",
           "end",
           "t",
+          ":",
+          "?",
         ].includes(key.name) ||
         (view.focus === "artifact" && (key.name === "j" || key.name === "k"));
       if (handled) {
@@ -1324,7 +1492,8 @@ async function main(): Promise<void> {
         void shutdown();
         return;
       }
-      if (key.name === "t") openThemePicker();
+      if (key.name === ":" || key.name === "?") openPalette();
+      else if (key.name === "t") openThemePicker();
       else if (key.name === "r" && key.shift) openPrompt("continue");
       else if (key.name === "r") void refresh("Refreshing sessions…");
       else if (key.name === "o") setArtifact(nextArtifactView());
@@ -1470,13 +1639,29 @@ async function main(): Promise<void> {
         panel.borderColor = palette.accent;
         panel.titleColor = palette.accent;
       }
-      for (const input of [searchInput, promptInput]) {
+      for (const input of [searchInput, paletteInput]) {
         input.backgroundColor = palette.panel;
         input.focusedBackgroundColor = palette.selected;
         input.textColor = palette.text;
         input.focusedTextColor = palette.text;
         input.placeholderColor = palette.dim;
       }
+      promptInput.backgroundColor = palette.panel;
+      promptInput.focusedBackgroundColor = palette.selected;
+      promptInput.textColor = palette.text;
+      promptInput.focusedTextColor = palette.text;
+      promptInput.placeholderColor = palette.dim;
+      palettePanel.backgroundColor = palette.background;
+      palettePanel.borderColor = palette.accent;
+      palettePanel.titleColor = palette.accent;
+      paletteList.backgroundColor = palette.background;
+      paletteList.focusedBackgroundColor = palette.background;
+      paletteList.textColor = palette.text;
+      paletteList.focusedTextColor = palette.text;
+      paletteList.descriptionColor = palette.dim;
+      paletteList.selectedDescriptionColor = palette.text;
+      paletteList.selectedBackgroundColor = palette.selected;
+      paletteList.selectedTextColor = palette.accent;
       searchPanel.backgroundColor = palette.background;
       searchPanel.borderColor = palette.accent;
       searchPanel.titleColor = palette.accent;
@@ -1496,6 +1681,95 @@ async function main(): Promise<void> {
       updateDetails();
       renderArtifactRows(true);
       updateChrome();
+    }
+
+    function buildPaletteCommands(): PaletteCommand[] {
+      const session = selectedSession();
+      const stoppable =
+        session?.status === "active" || session?.status === "idle";
+      const target = promptTargetForSession(session);
+      return [
+        { id: "prompt", label: "Send a prompt", key: "s", hint: "steer, prompt, or continue the selected session", disabled: target ? undefined : "no promptable session selected" },
+        { id: "new", label: "New session", key: "n", hint: "pick a provider and model, then type the first prompt" },
+        { id: "continue", label: "Continue thread in a new run", key: "R", hint: "finished sessions only", disabled: target?.route === "continue" ? undefined : "select a finished session with a thread" },
+        { id: "model", label: "Choose model", key: "m" },
+        { id: "find", label: "Find a past session", key: "f", hint: "deja search", disabled: dejaAvailable ? undefined : "deja is not on PATH" },
+        { id: "stop", label: session?.status === "idle" ? "End idle session" : "Interrupt turn", key: "x x", disabled: stoppable ? undefined : "no active or idle session" },
+        { id: "tab-chat", label: "Show chat", key: "o" },
+        { id: "tab-trace", label: "Show activity", key: "o" },
+        { id: "tab-output", label: "Show output", key: "o" },
+        { id: "tab-diff", label: "Show diff", key: "o", hint: "tracked changes against HEAD" },
+        { id: "fold", label: "Fold or unfold every diff file", key: "Z", disabled: view.artifact === "diff" ? undefined : "diff tab only" },
+        { id: "search", label: "Search this pane", key: "/" },
+        { id: "filter", label: "Filter sessions", key: "/", hint: "project, thread, status, or model" },
+        { id: "follow", label: "Resume live follow", key: "End", disabled: artifactFollowing ? "already following" : undefined },
+        { id: "details", label: "Cycle session details", key: "i" },
+        { id: "sessions", label: layout === "beta" ? "Open sessions" : "Focus sessions", key: "Tab" },
+        { id: "theme", label: "Change theme", key: "t", hint: "live preview" },
+        { id: "refresh", label: "Refresh sessions", key: "r" },
+        { id: "copy", label: "Copy selected row", key: "c" },
+        { id: "quit", label: "Quit", key: "q" },
+      ];
+    }
+
+    function openPalette(): void {
+      paletteCommands = buildPaletteCommands();
+      paletteOpen = true;
+      palettePanel.visible = true;
+      paletteInput.value = "";
+      fillPalette("");
+      paletteInput.focus();
+    }
+
+    function fillPalette(query: string): void {
+      const matches = filterPaletteCommands(paletteCommands, query);
+      paletteList.options = matches.map((command) => ({
+        name: `${command.label}${command.key ? `   ${command.key}` : ""}`,
+        description: command.disabled
+          ? `unavailable · ${command.disabled}`
+          : (command.hint ?? ""),
+        value: command.id,
+      }));
+      paletteList.setSelectedIndex(0);
+    }
+
+    function closePalette(): void {
+      paletteOpen = false;
+      palettePanel.visible = false;
+      focusCurrentPanel();
+    }
+
+    function runPaletteSelection(): void {
+      const id = paletteList.getSelectedOption()?.value as string | undefined;
+      const command = paletteCommands.find((candidate) => candidate.id === id);
+      closePalette();
+      if (!command) return;
+      if (command.disabled) {
+        setStatus(`${command.label}: ${command.disabled}`, "warning");
+        return;
+      }
+      switch (command.id) {
+        case "prompt": openPrompt("auto"); break;
+        case "new": startNewSessionFlow(); break;
+        case "continue": openPrompt("continue"); break;
+        case "model": openModelPicker(); break;
+        case "find": openDejaSearch(); break;
+        case "stop": void requestInterrupt(); break;
+        case "tab-chat": setArtifact("chat"); break;
+        case "tab-trace": setArtifact("trace"); break;
+        case "tab-output": setArtifact("output"); break;
+        case "tab-diff": setArtifact("diff"); break;
+        case "fold": toggleAllDiffFiles(); break;
+        case "search": focusArtifact(); openSearch(); break;
+        case "filter": focusSessions(); openSearch(); break;
+        case "follow": resumeFollowing(); break;
+        case "details": cycleDetails(); break;
+        case "sessions": layout === "beta" ? showSessions() : focusSessions(); break;
+        case "theme": openThemePicker(); break;
+        case "refresh": void refresh("Refreshing sessions…"); break;
+        case "copy": copyCurrentSelection(); break;
+        case "quit": void shutdown(); break;
+      }
     }
 
     function focusCurrentPanel(): void {
@@ -1790,7 +2064,8 @@ async function main(): Promise<void> {
 
     function openPromptInput(): void {
       view = reduceView(view, { type: "open-steer" });
-      promptInput.value = "";
+      promptInput.setText("");
+      fitPromptHeight();
       updatePromptChrome();
       promptInput.focus();
       updateChrome();
@@ -1823,7 +2098,7 @@ async function main(): Promise<void> {
           ? (pendingModel.label ?? pendingModel.id)
           : (session?.model ?? "");
       const effort = session?.effort ? ` · ${session.effort}` : "";
-      promptMetaRight.content = sessionUsageSummary(session);
+      promptMetaRight.content = renderUsage(session);
       if (promptMode === "new") {
         const target = pendingResume
           ? `resume ${pendingResume.provider} ${pendingResume.sessionId.slice(0, 12)}…`
@@ -1875,7 +2150,7 @@ async function main(): Promise<void> {
     async function submitPrompt(): Promise<void> {
       if (actionRunning || !promptMode) return;
       const mode = promptMode;
-      const message = promptInput.value.trim();
+      const message = promptInput.plainText.trim();
       if (!message) return;
       if (mode === "new") {
         await startNewSession(message);
@@ -2133,7 +2408,7 @@ async function main(): Promise<void> {
       sessions = filterSessions(listedSessions, sessionQuery);
       view = reduceView(view, { type: "sessions", sessions });
       sessionList.options = sessions.map((session) => ({
-        name: `${isLive(session) ? "LIVE" : "RECENT"}  ${sessionLabel(session)}`,
+        name: sessionCardTitle(session),
         description: sessionDescription(session),
         value: session.stateDir,
       }));
@@ -2156,16 +2431,38 @@ async function main(): Promise<void> {
       updateChrome();
     }
 
+    // "● project            2m ago": the age hugs the right edge of the card.
+    const SESSION_TAG_CELLS = 8;
+    function sessionCardInnerWidth(): number {
+      return Math.max(24, (sessionList.width || 36) - 4);
+    }
+    function sessionCardTitle(session: Session): string {
+      const label = sessionLabel(session);
+      const separator = label.lastIndexOf("  ");
+      const head = separator > 0 ? label.slice(0, separator) : label;
+      const age = separator > 0 ? label.slice(separator + 2) : "";
+      const room = sessionCardInnerWidth() - [...age].length - 1 - SESSION_TAG_CELLS;
+      const shownHead =
+        [...head].length > room ? `${[...head].slice(0, Math.max(1, room - 1)).join("")}…` : head;
+      return `${shownHead.padEnd(room)}${" ".repeat(SESSION_TAG_CELLS)} ${age}`;
+    }
+
     async function updateSelectedSession(): Promise<void> {
       const session = selectedSession();
       updateDetails();
       if (!session) {
         setArtifactRows([
-          { id: "empty", text: "No trace or output to display.", copyText: "" },
+          {
+            id: "empty-action",
+            text: "No sessions yet. Press n or click here to start one.",
+            copyText: "",
+            action: () => startNewSessionFlow(),
+          },
         ]);
         return;
       }
       const currentKey = `${session.stateDir}:${view.artifact}`;
+      const forceDiff = artifactKey !== currentKey;
       if (artifactKey !== currentKey) {
         artifactKey = currentKey;
         artifactSignature = "";
@@ -2181,7 +2478,7 @@ async function main(): Promise<void> {
         view.artifact === "trace" ? session.tracePath : session.outputPath;
       const diffResult =
         view.artifact === "diff" && session.cwd
-          ? await readWorkspaceDiff(session.cwd)
+          ? await readWorkspaceDiff(session.cwd, forceDiff)
           : undefined;
       const [content, eventContent] = await Promise.all([
         view.artifact === "chat" || view.artifact === "diff"
@@ -2195,6 +2492,7 @@ async function main(): Promise<void> {
       if (view.artifact === "chat") {
         const entries = parseChatTranscript(eventContent, session.threadId);
         const rows: ActivityRow[] = [];
+        const initialLoad = artifactSignature === "";
         for (const [index, entry] of entries.entries()) {
           const previous = entries[index - 1];
           // Breathing room: a blank line before each speaker change keeps the
@@ -2208,17 +2506,31 @@ async function main(): Promise<void> {
             copyText: entry.text,
           });
         }
+        // Stream only text that arrived while we were watching; a transcript
+        // opened mid-session appears fully written.
+        const lastAgent = [...rows].reverse().find((row) => row.chat?.kind === "agent");
+        if (lastAgent && sessionIsWorking(session)) {
+          const previousLength = seenAgentLength.get(lastAgent.id);
+          if (!initialLoad && previousLength !== lastAgent.text.length) {
+            const from =
+              stream?.id === lastAgent.id ? stream.revealed : (previousLength ?? 0);
+            stream = { id: lastAgent.id, revealed: from, target: lastAgent.text.length };
+          }
+        } else if (stream && lastAgent?.id !== stream.id) stream = undefined;
+        for (const row of rows)
+          if (row.chat?.kind === "agent") seenAgentLength.set(row.id, row.text.length);
         setArtifactRows(
           rows.length > 0
             ? [...rows, ...liveRow(session)]
             : [
-                {
-                  id: "empty",
-                  text: session.status === "starting"
-                    ? "Session is starting…"
-                    : "No conversation yet — type below to send a prompt.",
-                  copyText: "",
-                },
+                session.status === "starting"
+                  ? { id: "empty", text: "Session is starting…", copyText: "" }
+                  : {
+                      id: "empty-action",
+                      text: "No conversation yet. Press s or click here to send a prompt.",
+                      copyText: "",
+                      action: () => openPrompt("auto"),
+                    },
                 ...liveRow(session),
               ],
         );
@@ -2286,14 +2598,39 @@ async function main(): Promise<void> {
           (session.cwd ? undefined : "This session has no working directory.");
         for (const path of collapsedDiffFiles)
           if (!diffFileStats.has(path)) collapsedDiffFiles.delete(path);
+        const touchedSignature = `${session.stateDir}:${session.startedAt}:${[...diffFileStats.keys()].join("\u0000")}:${diffResult?.content.length ?? 0}`;
+        if (touchedSignature !== diffTouchedSignature && session.cwd) {
+          diffTouchedSignature = touchedSignature;
+          diffTouchedPaths = await touchedSince(
+            session.cwd,
+            diffFileStats.keys(),
+            session.startedAt,
+          );
+          if (session.stateDir !== view.selectedStateDir) return;
+          artifactSignature = "";
+        }
         setArtifactRows(buildDiffRows());
       }
     }
 
+
     function buildDiffRows(): ActivityRow[] {
       if (diffLines.length === 0) {
         if (diffError)
-          return [{ id: "empty", text: `× ${diffError}`, copyText: "" }];
+          return [
+            { id: "empty", text: `× ${diffError}`, copyText: "" },
+            {
+              id: "empty-action",
+              text: "  Click here or press Enter to retry.",
+              copyText: "",
+              action: () => {
+                const cwd = selectedSession()?.cwd;
+                if (cwd) diffCache.delete(cwd);
+                artifactSignature = "";
+                void updateSelectedSession();
+              },
+            },
+          ];
         return [
           { id: "empty", text: "✓ Working tree matches HEAD", copyText: "" },
           {
@@ -2328,7 +2665,8 @@ async function main(): Promise<void> {
     function activateSelectedRow(): void {
       const row = artifactRows[selectedRow];
       if (!row) return;
-      if (row.diff?.path) toggleDiffFile(row.diff.path);
+      if (row.action) row.action();
+      else if (row.diff?.path) toggleDiffFile(row.diff.path);
       else toggleSelectedTool();
     }
 
@@ -2405,9 +2743,11 @@ async function main(): Promise<void> {
       }
       rowRenderables = artifactRows.map((row, index) => {
         const match = rowMatchesQuery(row);
+        // scrollX leaves the content box unbounded, so "100%" would never
+        // wrap; pin prose rows to the viewport width instead.
         const renderable = new TextRenderable(renderer, {
           id: `artifact-row-${index}`,
-          width: view.artifact === "diff" ? diffRowWidth(row) : "100%",
+          width: view.artifact === "diff" ? diffRowWidth(row) : proseRowWidth(),
           wrapMode: view.artifact === "diff" ? "none" : "word",
           content: renderArtifactRow(row, match, index === selectedRow),
           fg: palette.text,
@@ -2421,7 +2761,8 @@ async function main(): Promise<void> {
           const previousRow = selectedRow;
           selectedRow = index;
           refreshArtifactRow(previousRow);
-          if (row.activity?.kind === "tool") toggleTool(row.id);
+          if (row.action) row.action();
+          else if (row.activity?.kind === "tool") toggleTool(row.id);
           else if (row.diff?.kind === "file" && row.diff.path)
             toggleDiffFile(row.diff.path);
           else {
@@ -2443,13 +2784,22 @@ async function main(): Promise<void> {
       match: boolean,
       selected: boolean,
     ): string | StyledText {
-      const selection = selected ? t`${bold(fg(palette.accent)("▸ "))}` : t``;
+      const selection = selected ? t`${bold(fg(palette.accent)("▎"))}` : t` `;
       const marker = match ? t`${bold(fg(palette.warning)("◆ "))}` : t``;
       if (row.chat)
         return new StyledText([
           ...selection.chunks,
           ...marker.chunks,
-          ...renderChatEntry(row.chat).chunks,
+          ...renderChatEntry(
+            row.chat,
+            stream?.id === row.id ? stream.revealed : undefined,
+          ).chunks,
+        ]);
+      if (row.action)
+        return new StyledText([
+          ...selection.chunks,
+          ...marker.chunks,
+          ...t`${underline(fg(palette.accent)(row.text.trimStart()))}`.chunks,
         ]);
       if (row.live)
         return t`${fg(palette.success)(spinnerFrame(animationTick))} ${italic(fg(palette.dim)(liveRowText()))}`;
@@ -2473,9 +2823,11 @@ async function main(): Promise<void> {
           ...body.chunks,
         ]);
       }
-      const base = renderTraceActivity(row.activity, row.detail);
+      const expanded =
+        row.activity.kind === "tool" && expandedToolIDs.has(row.id);
+      const base = renderTraceActivity(row.activity, row.detail, expanded);
       const chunks = [...selection.chunks, ...marker.chunks, ...base.chunks];
-      if (row.activity.kind === "tool" && expandedToolIDs.has(row.id))
+      if (expanded)
         chunks.push(...renderToolDetail(row.detail, row.activity).chunks);
       return new StyledText(chunks);
     }
@@ -2528,7 +2880,7 @@ async function main(): Promise<void> {
         const counts = stats
           ? `  ${stats.status}  +${stats.additions} −${stats.deletions}`
           : "";
-        const tail = padCells("", Math.max(0, width - [...head].length - [...counts].length - (folded ? 9 : 0)));
+        const tail = padCells("", Math.max(0, width - [...head].length - [...counts].length - (folded ? 9 : 0) - (diffTouchedPaths.has(path) ? 16 : 0)));
         const chunks = [
           ...t`${bg(rowBg)(fg(markerColor)(markerText))}${bg(rowBg)(bold(fg(palette.accent)(head)))}`.chunks,
         ];
@@ -2539,6 +2891,11 @@ async function main(): Promise<void> {
           );
         if (folded)
           chunks.push(...t`${bg(rowBg)(italic(fg(palette.dim)("  folded")))}`.chunks);
+        if (diffTouchedPaths.has(path))
+          chunks.push(
+            ...t`${bg(rowBg)(fg(palette.dim)("  "))}${bg(rowBg)(fg(palette.accent)("●"))}${bg(rowBg)(fg(palette.dim)(" this session"))}`
+              .chunks,
+          );
         chunks.push(...t`${bg(rowBg)(tail)}`.chunks);
         return new StyledText(chunks);
       }
@@ -2589,10 +2946,18 @@ async function main(): Promise<void> {
           : diff.kind === "deletion"
             ? palette.danger
             : palette.dim;
-      const contentColor =
-        diff.kind === "context" ? palette.dim : palette.text;
       const tail = padCells("", Math.max(0, width - diffGutterCells() - 1 - [...content].length));
-      return t`${bg(gutterBg)(fg(markerColor)(markerText))}${bg(gutterBg)(fg(palette.dim)(gutter))}${bg(lineBg)(bold(fg(signColor)(sign)))}${bg(lineBg)(fg(contentColor)(content))}${bg(lineBg)(tail)}`;
+      return new StyledText([
+        ...t`${bg(gutterBg)(fg(markerColor)(markerText))}${bg(gutterBg)(fg(palette.dim)(gutter))}${bg(lineBg)(bold(fg(signColor)(sign)))}`
+          .chunks,
+        ...codeChunks(
+          content,
+          filetypeForPath(diff.path),
+          diff.kind === "context",
+          lineBg,
+        ),
+        ...t`${bg(lineBg)(tail)}`.chunks,
+      ]);
     }
 
     function refreshArtifactRow(index: number): void {
@@ -2605,6 +2970,10 @@ async function main(): Promise<void> {
         rowMatchesQuery(row),
         index === selectedRow,
       );
+    }
+
+    function proseRowWidth(): number {
+      return Math.max(20, artifactScroll.width - 1);
     }
 
     function diffGutterCells(): number {
@@ -2750,6 +3119,14 @@ async function main(): Promise<void> {
       }
       diffSidebar.visible = view.artifact === "diff" && renderer.width >= 100;
       diffDivider.visible = diffSidebar.visible;
+      if (!diffDividerDragging) {
+        const container = artifactBody.width || Math.max(60, renderer.width - 46);
+        const next = diffTreeWidthForRatio(diffTreeRatio, container, diffTreeWidth);
+        if (next !== diffTreeWidth) {
+          diffTreeWidth = next;
+          updateDiffFileTree();
+        }
+      }
       diffSidebar.width = diffTreeWidth;
       updateDiffSummaryLine();
       followIndicator.content = view.artifact === "diff" || artifactFollowing
@@ -2840,13 +3217,32 @@ async function main(): Promise<void> {
       return branch ? `${shortCwd}:${branch}` : shortCwd;
     }
 
-    function sessionUsageSummary(session: Session | undefined): string {
-      if (!session) return "";
-      const parts: string[] = [];
-      const usage = formatTokenUsage(session.tokenUsage);
-      if (usage) parts.push(usage);
-      parts.push(session.status);
-      return parts.join(" · ");
+    function renderUsage(session: Session | undefined): StyledText {
+      if (!session) return t``;
+      const chunks: StyledText["chunks"] = [];
+      const meter = contextMeter(session.tokenUsage, 8);
+      if (meter) {
+        const color =
+          meter.ratio >= 0.85
+            ? palette.danger
+            : meter.ratio >= 0.6
+              ? palette.warning
+              : palette.success;
+        chunks.push(
+          ...t`${fg(color)(renderMeter(meter))} ${fg(palette.text)(meter.label)}`.chunks,
+        );
+        const cost = session.tokenUsage?.costUsd;
+        if (cost !== undefined)
+          chunks.push(...t`${fg(palette.dim)(` · $${cost.toFixed(cost < 1 ? 3 : 2)}`)}`.chunks);
+      } else {
+        const usage = formatTokenUsage(session.tokenUsage);
+        if (usage) chunks.push(...t`${fg(palette.text)(usage)}`.chunks);
+      }
+      if (chunks.length > 0) chunks.push(...t`${fg(palette.dim)(" · ")}`.chunks);
+      chunks.push(
+        ...t`${fg(sessionStatusColor(session.status))(session.status)}`.chunks,
+      );
+      return new StyledText(chunks);
     }
 
     function setStatus(
@@ -2947,6 +3343,12 @@ async function main(): Promise<void> {
         updateWorkingIndicator();
         const liveIndex = artifactRows.findIndex((row) => row.live);
         if (liveIndex >= 0) refreshArtifactRow(liveIndex);
+        if (stream && stream.revealed < stream.target) {
+          stream.revealed = typewriterReveal(stream.revealed, stream.target);
+          const streamIndex = artifactRows.findIndex((row) => row.id === stream!.id);
+          if (streamIndex >= 0) refreshArtifactRow(streamIndex);
+          if (artifactFollowing) resumeFollowing(false);
+        }
       }
       if (
         statusState.idle ||
@@ -3007,6 +3409,44 @@ async function main(): Promise<void> {
   }
 }
 
+function tokenColor(token: CodeToken, muted: boolean): string {
+  const base =
+    token === "keyword"
+      ? palette.accent
+      : token === "string"
+        ? palette.success
+        : token === "number"
+          ? palette.warning
+          : token === "comment"
+            ? palette.dim
+            : token === "type"
+              ? blendHex(palette.text, palette.warning, 0.45)
+              : token === "punctuation"
+                ? blendHex(palette.text, palette.dim, 0.5)
+                : token === "property"
+                  ? blendHex(palette.text, palette.accent, 0.35)
+                  : palette.text;
+  return muted ? blendHex(base, palette.dim, 0.55) : base;
+}
+
+function codeChunks(
+  line: string,
+  filetype: string,
+  muted: boolean,
+  rowBg?: string,
+): StyledText["chunks"] {
+  const chunks: StyledText["chunks"] = [];
+  for (const span of highlightCode(line, filetype)) {
+    let chunk = fg(tokenColor(span.token, muted))(span.text);
+    if (span.token === "comment") chunk = italic(chunk);
+    else if (span.token === "keyword" || span.token === "function")
+      chunk = bold(chunk);
+    if (rowBg) chunk = bg(rowBg)(chunk);
+    chunks.push(...t`${chunk}`.chunks);
+  }
+  return chunks;
+}
+
 function renderSessionDetails(
   session: Session | undefined,
   content: string,
@@ -3042,10 +3482,19 @@ function sessionStatusColor(status: string): string {
   return palette.text;
 }
 
-function renderChatEntry(entry: ChatEntry): StyledText {
+function renderChatEntry(entry: ChatEntry, revealed?: number): StyledText {
   if (entry.kind === "user")
     return t`${bold(fg(palette.accent)("❯ "))}${bold(fg(palette.text)(entry.text))}`;
-  if (entry.kind === "agent") return t`${fg(palette.text)(entry.text)}`;
+  if (entry.kind === "agent") {
+    const text =
+      revealed !== undefined && revealed < entry.text.length
+        ? entry.text.slice(0, revealed)
+        : entry.text;
+    const chunks = renderMarkdown(text);
+    if (revealed !== undefined && revealed < entry.text.length)
+      chunks.push(...t`${fg(palette.accent)("▍")}`.chunks);
+    return new StyledText(chunks);
+  }
   if (entry.kind === "thought")
     return t`${italic(fg(palette.dim)(entry.text))}`;
   const status = entry.status ?? "running";
@@ -3059,9 +3508,79 @@ function renderChatEntry(entry: ChatEntry): StyledText {
   return t`  ${fg(color)(glyph)} ${fg(palette.dim)(entry.text)}`;
 }
 
+function renderInline(spans: InlineSpan[], baseColor = palette.text): StyledText["chunks"] {
+  const chunks: StyledText["chunks"] = [];
+  for (const span of spans) {
+    const chunk =
+      span.style === "code"
+        ? bg(palette.panel)(fg(palette.accent)(` ${span.text} `))
+        : span.style === "bold"
+          ? bold(fg(baseColor)(span.text))
+          : span.style === "italic"
+            ? italic(fg(baseColor)(span.text))
+            : span.style === "link"
+              ? underline(fg(palette.accent)(span.text))
+              : fg(baseColor)(span.text);
+    chunks.push(...t`${chunk}`.chunks);
+  }
+  return chunks;
+}
+
+function renderMarkdownLine(line: MarkdownLine): StyledText["chunks"] {
+  switch (line.kind) {
+    case "heading": {
+      const color = (line.level ?? 1) <= 2 ? palette.accent : palette.text;
+      const prefix = (line.level ?? 1) <= 2 ? "" : `${"#".repeat(line.level ?? 3)} `;
+      return t`${bold(fg(color)(prefix))}${bold(fg(color)(line.spans.map((span) => span.text).join("")))}`.chunks;
+    }
+    case "bullet":
+      return [
+        ...t`${"  ".repeat(line.indent ?? 0)}${fg(palette.accent)("•")} `.chunks,
+        ...renderInline(line.spans),
+      ];
+    case "numbered":
+      return [
+        ...t`${"  ".repeat(line.indent ?? 0)}${fg(palette.accent)(line.marker ?? "1.")} `.chunks,
+        ...renderInline(line.spans),
+      ];
+    case "quote":
+      return [
+        ...t`${fg(palette.border)("▎ ")}`.chunks,
+        ...renderInline(line.spans, palette.dim),
+      ];
+    case "fence":
+      return t`${fg(palette.dim)(`  ${line.language ? `▎ ${line.language}` : "▎"}`)}`.chunks;
+    case "code": {
+      const text = line.spans.map((span) => span.text).join("");
+      return [
+        ...t`${bg(palette.panel)("  ")}`.chunks,
+        ...codeChunks(text, line.language ?? "plain", false, palette.panel),
+        ...t`${bg(palette.panel)(" ")}`.chunks,
+      ];
+    }
+    case "rule":
+      return t`${fg(palette.border)("─".repeat(24))}`.chunks;
+    case "blank":
+      return [];
+    default:
+      return renderInline(line.spans);
+  }
+}
+
+function renderMarkdown(text: string): StyledText["chunks"] {
+  const lines = parseMarkdown(text);
+  const chunks: StyledText["chunks"] = [];
+  for (const [index, line] of lines.entries()) {
+    if (index > 0) chunks.push(...t`\n`.chunks);
+    chunks.push(...renderMarkdownLine(line));
+  }
+  return chunks;
+}
+
 function renderTraceActivity(
   activity: TraceActivity,
   detail?: ToolEventDetail,
+  expanded = false,
 ): StyledText {
   if (activity.kind === "thought")
     return t`${italic(fg(palette.dim)(activity.text))}`;
@@ -3082,7 +3601,12 @@ function renderTraceActivity(
     const text = subAgent
       ? `${detail.activityKind ?? "activity"} ${detail.agentPath ?? detail.agentThreadId ?? "sub-agent"}`
       : activity.text;
-    return t`${fg(color)(glyph)} ${bold(fg(color)(label))} ${fg(palette.text)(text)}${fg(palette.dim)(duration)} ${fg(palette.dim)("›")}`;
+    const caret = expanded ? "▾" : "▸";
+    const exit =
+      detail?.exitCode !== undefined && detail.exitCode !== 0
+        ? `  exit ${detail.exitCode}`
+        : "";
+    return t`${fg(palette.dim)(caret)} ${fg(color)(glyph)} ${bold(fg(color)(label))}  ${fg(palette.text)(text)}${fg(palette.dim)(duration)}${fg(palette.danger)(exit)}`;
   }
   if (activity.kind === "message")
     return t`${fg(palette.accent)("›")} ${fg(palette.text)(activity.text)}`;
@@ -3098,40 +3622,44 @@ function renderToolDetail(
   detail: ToolEventDetail | undefined,
   activity: TraceActivity,
 ): StyledText {
-  if (!detail)
-    return t`\n  ${fg(palette.dim)("No additional tool detail was captured.")}`;
+  const rail = fg(palette.border)("  │ ");
+  const chunks: StyledText["chunks"] = [];
+  const line = (...parts: StyledText["chunks"][]) => {
+    chunks.push(...t`\n${rail}`.chunks);
+    for (const part of parts) chunks.push(...part);
+  };
+  const field = (label: string, value: string, color = palette.text) =>
+    line(t`${fg(palette.dim)(label.padEnd(8))}${fg(color)(value)}`.chunks);
+  if (!detail) {
+    line(t`${italic(fg(palette.dim)("No additional tool detail was captured."))}`.chunks);
+    return new StyledText(chunks);
+  }
   const command = detail.command || detail.query || detail.toolName || activity.text;
   const status = `${detail.status}${detail.exitCode === undefined ? "" : ` · exit ${detail.exitCode}`}${
     detail.durationMs === undefined
       ? ""
       : ` · ${formatDuration(detail.durationMs)}`
   }`;
-  const outputLines = (detail.output || "").trimEnd().split("\n");
-  const clipped = outputLines.length > TOOL_OUTPUT_LINES;
-  const visibleOutput = outputLines.slice(-TOOL_OUTPUT_LINES).join("\n");
-  const chunks =
-    t`\n  ${fg(palette.dim)("command")}  ${fg(palette.text)(command)}\n  ${fg(palette.dim)("status ")}  ${fg(sessionStatusColor(detail.status))(status)}`
-      .chunks;
-  if (detail.cwd)
-    chunks.push(
-      ...t`\n  ${fg(palette.dim)("cwd    ")}  ${fg(palette.accent)(detail.cwd)}`
+  field("command", command);
+  field("status", status, sessionStatusColor(detail.status));
+  if (detail.cwd) field("cwd", detail.cwd, palette.accent);
+  if (detail.agentThreadId) field("thread", detail.agentThreadId, palette.accent);
+  if (detail.input && Object.keys(detail.input).length > 0) {
+    line(t`${fg(palette.dim)("input")}`.chunks);
+    for (const inputLine of JSON.stringify(detail.input, null, 2).split("\n"))
+      line(codeChunks(inputLine, "json", false));
+  }
+  if (detail.output) {
+    const outputLines = detail.output.trimEnd().split("\n");
+    const clipped = outputLines.length > TOOL_OUTPUT_LINES;
+    line(
+      t`${fg(palette.dim)(clipped ? `output · last ${TOOL_OUTPUT_LINES} of ${outputLines.length} lines` : "output")}`
         .chunks,
     );
-  if (detail.agentThreadId)
-    chunks.push(
-      ...t`\n  ${fg(palette.dim)("thread ")}  ${fg(palette.accent)(detail.agentThreadId)}`
-        .chunks,
-    );
-  if (detail.input && Object.keys(detail.input).length > 0)
-    chunks.push(
-      ...t`\n  ${fg(palette.dim)("input  ")}  ${fg(palette.text)(JSON.stringify(detail.input, null, 2))}`
-        .chunks,
-    );
-  if (detail.output)
-    chunks.push(
-      ...t`\n  ${fg(palette.dim)(clipped ? `output · last ${TOOL_OUTPUT_LINES} lines` : "output")}\n${fg(palette.text)(visibleOutput)}`
-        .chunks,
-    );
+    for (const outputLine of outputLines.slice(-TOOL_OUTPUT_LINES))
+      line(t`${fg(palette.text)(outputLine)}`.chunks);
+  }
+  chunks.push(...t`\n${fg(palette.border)("  ╰")}`.chunks);
   return new StyledText(chunks);
 }
 

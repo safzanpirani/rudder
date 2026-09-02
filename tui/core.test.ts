@@ -39,6 +39,17 @@ import {
   statusGlyphForKind,
   statusTimeoutMs,
   visibleGitDiffLineIndices,
+  contextMeter,
+  diffTreeWidthForRatio,
+  filetypeForFence,
+  filetypeForPath,
+  filterPaletteCommands,
+  highlightCode,
+  nextDiffPollDelay,
+  parseInline,
+  parseMarkdown,
+  renderMeter,
+  typewriterReveal,
   promptModeForSession,
   promptTargetForSession,
   resolvePromptTarget,
@@ -463,6 +474,128 @@ describe("artifact and display helpers", () => {
     expect(statusGlyphForKind("warning")).toBe("!");
     expect(statusGlyphForKind("info")).toBe("›");
     expect(statusTimeoutMs("error")).toBeGreaterThan(statusTimeoutMs("success"));
+  });
+
+  test("tokenizes code lines by language without leaving the line", () => {
+    expect(filetypeForPath("src/app.tsx")).toBe("typescript");
+    expect(filetypeForPath("main.go")).toBe("go");
+    expect(filetypeForPath("Dockerfile")).toBe("shell");
+    expect(filetypeForPath("notes.txt")).toBe("plain");
+    expect(filetypeForPath(undefined)).toBe("plain");
+    expect(filetypeForFence("```".slice(3) + "tsx")).toBe("typescript");
+    expect(filetypeForFence("bash title=x")).toBe("shell");
+    expect(filetypeForFence("")).toBe("plain");
+    expect(highlightCode('const x = "hi"; // note', "typescript")).toEqual([
+      { text: "const", token: "keyword" },
+      { text: " x ", token: "plain" },
+      { text: "=", token: "punctuation" },
+      { text: " ", token: "plain" },
+      { text: '"hi"', token: "string" },
+      { text: ";", token: "punctuation" },
+      { text: " ", token: "plain" },
+      { text: "// note", token: "comment" },
+    ]);
+    expect(highlightCode("return foo(42)", "go").map((span) => span.token)).toEqual([
+      "keyword",
+      "plain",
+      "function",
+      "punctuation",
+      "number",
+      "punctuation",
+    ]);
+    expect(highlightCode("def run(self): # go", "python").map((span) => span.token)).toContain("comment");
+    expect(highlightCode("echo $HOME # c", "shell").map((span) => span.token)).toEqual([
+      "keyword",
+      "plain",
+      "comment",
+    ]);
+    expect(highlightCode('{"key": 1}', "json").map((span) => span.token)).toEqual([
+      "punctuation",
+      "property",
+      "punctuation",
+      "plain",
+      "number",
+      "punctuation",
+    ]);
+    expect(highlightCode("plain words", "plain")).toEqual([{ text: "plain words", token: "plain" }]);
+    expect(highlightCode("", "go")).toEqual([]);
+    expect(highlightCode("a.b", "typescript").map((span) => span.token)).toEqual([
+      "plain",
+      "punctuation",
+      "property",
+    ]);
+  });
+
+  test("parses markdown blocks and inline emphasis for chat rendering", () => {
+    expect(parseInline("use `x` and **bold** or *it* and [a](http://b)")).toEqual([
+      { text: "use ", style: "plain" },
+      { text: "x", style: "code" },
+      { text: " and ", style: "plain" },
+      { text: "bold", style: "bold" },
+      { text: " or ", style: "plain" },
+      { text: "it", style: "italic" },
+      { text: " and ", style: "plain" },
+      { text: "a", style: "link" },
+    ]);
+    expect(parseInline("snake_case_name stays")).toEqual([
+      { text: "snake_case_name stays", style: "plain" },
+    ]);
+    const lines = parseMarkdown(
+      "# Title\n\n- one\n  - two\n1. first\n> quoted\n---\n```ts\nconst a = 1\n```\ntail",
+    );
+    expect(lines.map((line) => line.kind)).toEqual([
+      "heading",
+      "blank",
+      "bullet",
+      "bullet",
+      "numbered",
+      "quote",
+      "rule",
+      "fence",
+      "code",
+      "paragraph",
+    ]);
+    expect(lines[0].level).toBe(1);
+    expect(lines[3].indent).toBe(1);
+    expect(lines[4].marker).toBe("1.");
+    expect(lines[8].language).toBe("typescript");
+    expect(lines[8].spans[0].text).toBe("const a = 1");
+    expect(parseMarkdown("```\nunterminated").map((line) => line.kind)).toEqual(["fence", "code"]);
+  });
+
+  test("builds a context meter and filters palette commands", () => {
+    expect(contextMeter(undefined)).toBeUndefined();
+    expect(contextMeter({ totalTokens: 100 })).toBeUndefined();
+    const meter = contextMeter({ totalTokens: 50_000, contextWindow: 200_000 }, 8)!;
+    expect(meter.filled).toBe(2);
+    expect(meter.label).toBe("50.0K · 25%");
+    expect(renderMeter(meter)).toBe("▰▰▱▱▱▱▱▱");
+    expect(renderMeter(contextMeter({ totalTokens: 900, contextWindow: 100 }, 4)!)).toBe("▰▰▰▰");
+    const commands = [
+      { id: "new", label: "New session", key: "n" },
+      { id: "theme", label: "Change theme", key: "t", hint: "colors" },
+      { id: "quit", label: "Quit", key: "q" },
+    ];
+    expect(filterPaletteCommands(commands, "").map((c) => c.id)).toEqual(["new", "theme", "quit"]);
+    expect(filterPaletteCommands(commands, "the").map((c) => c.id)).toEqual(["theme"]);
+    expect(filterPaletteCommands(commands, "colors").map((c) => c.id)).toEqual(["theme"]);
+    expect(filterPaletteCommands(commands, "q").map((c) => c.id)).toEqual(["quit"]);
+    expect(filterPaletteCommands(commands, "zzz")).toEqual([]);
+  });
+
+  test("backs off diff polling and derives the sidebar from a ratio", () => {
+    expect(nextDiffPollDelay(1_000, false)).toBe(2_000);
+    expect(nextDiffPollDelay(4_000, false)).toBe(8_000);
+    expect(nextDiffPollDelay(8_000, false)).toBe(8_000);
+    expect(nextDiffPollDelay(8_000, true)).toBe(1_000);
+    expect(diffTreeWidthForRatio(0.25, 120)).toBe(30);
+    expect(diffTreeWidthForRatio(0.9, 120)).toBe(60);
+    expect(diffTreeWidthForRatio(0.01, 120)).toBe(20);
+    expect(diffTreeWidthForRatio(undefined, 120, 33)).toBe(33);
+    expect(diffTreeWidthForRatio(0.5, 70)).toBe(30);
+    expect(typewriterReveal(0, 100, 24)).toBe(24);
+    expect(typewriterReveal(90, 100, 24)).toBe(100);
+    expect(typewriterReveal(120, 100)).toBe(100);
   });
 
   test("clamps the draggable diff tree width", () => {

@@ -26,6 +26,8 @@ export interface ThemeDefinition {
 export interface TUIConfig {
   theme?: string;
   diffTreeWidth?: number;
+  /** Sidebar width as a fraction of the artifact body; wins over diffTreeWidth. */
+  diffTreeRatio?: number;
 }
 
 export const defaultThemeName = "rudder";
@@ -122,10 +124,17 @@ export async function readTUIConfig(configFile?: string): Promise<TUIConfig> {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const theme = Reflect.get(parsed, "theme");
     const diffTreeWidth = Reflect.get(parsed, "diffTreeWidth");
+    const diffTreeRatio = Reflect.get(parsed, "diffTreeRatio");
     return {
       ...(typeof theme === "string" ? { theme } : {}),
       ...(typeof diffTreeWidth === "number" && Number.isFinite(diffTreeWidth)
         ? { diffTreeWidth }
+        : {}),
+      ...(typeof diffTreeRatio === "number" &&
+      Number.isFinite(diffTreeRatio) &&
+      diffTreeRatio > 0 &&
+      diffTreeRatio < 1
+        ? { diffTreeRatio }
         : {}),
     };
   } catch (error) {

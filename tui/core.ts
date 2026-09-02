@@ -1671,3 +1671,482 @@ export function formatElapsed(
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
+
+// ---------------------------------------------------------------------------
+// Lightweight syntax highlighting. A regex tokenizer keeps the diff and chat
+// renderers deterministic and dependency-free; Tree-sitter would need worker
+// threads and downloaded grammars for every language a session might touch.
+
+export type CodeToken =
+  | "plain"
+  | "keyword"
+  | "string"
+  | "comment"
+  | "number"
+  | "type"
+  | "function"
+  | "punctuation"
+  | "property";
+
+export interface CodeSpan {
+  text: string;
+  token: CodeToken;
+}
+
+const KEYWORDS: Record<string, Set<string>> = {
+  typescript: new Set(
+    "abstract as async await break case catch class const continue debugger declare default delete do else enum export extends false finally for from function if implements import in instanceof interface is keyof let namespace new null of package private protected public readonly return satisfies static super switch this throw true try type typeof undefined var void while with yield".split(" "),
+  ),
+  go: new Set(
+    "break case chan const continue default defer else fallthrough for func go goto if import interface map package range return select struct switch type var nil true false iota".split(" "),
+  ),
+  python: new Set(
+    "False None True and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield self".split(" "),
+  ),
+  rust: new Set(
+    "as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while".split(" "),
+  ),
+  shell: new Set(
+    "if then else elif fi for while until do done case esac function in return exit export local readonly set unset source echo printf test".split(" "),
+  ),
+  json: new Set(["true", "false", "null"]),
+  yaml: new Set(["true", "false", "null", "yes", "no"]),
+  c: new Set(
+    "auto break case char const continue default do double else enum extern float for goto if inline int long register return short signed sizeof static struct switch typedef union unsigned void volatile while class public private protected virtual override new delete this nullptr true false namespace using template typename".split(" "),
+  ),
+  ruby: new Set(
+    "alias and begin break case class def defined? do else elsif end ensure false for if in module next nil not or redo rescue retry return self super then true undef unless until when while yield require attr_reader attr_accessor".split(" "),
+  ),
+  java: new Set(
+    "abstract assert boolean break byte case catch char class const continue default do double else enum extends final finally float for if implements import instanceof int interface long native new package private protected public return short static strictfp super switch synchronized this throw throws transient try void volatile while true false null var record".split(" "),
+  ),
+};
+
+const EXTENSION_FILETYPES: Record<string, string> = {
+  ts: "typescript",
+  tsx: "typescript",
+  mts: "typescript",
+  cts: "typescript",
+  js: "typescript",
+  jsx: "typescript",
+  mjs: "typescript",
+  cjs: "typescript",
+  go: "go",
+  py: "python",
+  pyi: "python",
+  rs: "rust",
+  sh: "shell",
+  bash: "shell",
+  zsh: "shell",
+  fish: "shell",
+  json: "json",
+  jsonc: "json",
+  yaml: "yaml",
+  yml: "yaml",
+  toml: "yaml",
+  c: "c",
+  h: "c",
+  cc: "c",
+  cpp: "c",
+  hpp: "c",
+  cs: "c",
+  swift: "c",
+  kt: "java",
+  java: "java",
+  rb: "ruby",
+  md: "markdown",
+  markdown: "markdown",
+  css: "css",
+  scss: "css",
+  html: "html",
+  svelte: "html",
+  vue: "html",
+  sql: "sql",
+};
+
+export function filetypeForPath(path: string | undefined): string {
+  if (!path) return "plain";
+  const name = basename(path);
+  if (name === "Dockerfile" || name === "Makefile") return "shell";
+  const extension = name.includes(".") ? name.split(".").pop()! : "";
+  return EXTENSION_FILETYPES[extension.toLowerCase()] ?? "plain";
+}
+
+export function filetypeForFence(info: string | undefined): string {
+  const language = (info ?? "").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+  if (!language) return "plain";
+  if (KEYWORDS[language]) return language;
+  const aliases: Record<string, string> = {
+    js: "typescript",
+    jsx: "typescript",
+    ts: "typescript",
+    tsx: "typescript",
+    javascript: "typescript",
+    typescriptreact: "typescript",
+    py: "python",
+    rs: "rust",
+    sh: "shell",
+    bash: "shell",
+    zsh: "shell",
+    console: "shell",
+    cpp: "c",
+    "c++": "c",
+    kotlin: "java",
+    rb: "ruby",
+    yml: "yaml",
+    toml: "yaml",
+  };
+  return aliases[language] ?? EXTENSION_FILETYPES[language] ?? "plain";
+}
+
+const LINE_COMMENT: Record<string, string[]> = {
+  typescript: ["//"],
+  go: ["//"],
+  rust: ["//"],
+  c: ["//"],
+  java: ["//"],
+  python: ["#"],
+  shell: ["#"],
+  yaml: ["#"],
+  ruby: ["#"],
+  sql: ["--"],
+  css: [],
+  html: [],
+  json: [],
+  markdown: [],
+  plain: [],
+};
+
+/**
+ * Tokenizes one line of code. Line-local by design: multi-line strings and
+ * block comments degrade to plain text, which is acceptable for a diff view.
+ */
+export function highlightCode(line: string, filetype: string): CodeSpan[] {
+  if (filetype === "plain" || filetype === "markdown" || line.length === 0)
+    return line.length === 0 ? [] : [{ text: line, token: "plain" }];
+  const keywords = KEYWORDS[filetype] ?? new Set<string>();
+  const comments = LINE_COMMENT[filetype] ?? [];
+  const spans: CodeSpan[] = [];
+  const push = (text: string, token: CodeToken) => {
+    if (!text) return;
+    const last = spans[spans.length - 1];
+    if (last && last.token === token) last.text += text;
+    else spans.push({ text, token });
+  };
+  let index = 0;
+  while (index < line.length) {
+    const rest = line.slice(index);
+    const comment = comments.find((marker) => rest.startsWith(marker));
+    if (comment && !(comment === "#" && filetype === "shell" && index > 0 && line[index - 1] === "$")) {
+      push(rest, "comment");
+      break;
+    }
+    if (rest.startsWith("/*")) {
+      const end = rest.indexOf("*/", 2);
+      const text = end < 0 ? rest : rest.slice(0, end + 2);
+      push(text, "comment");
+      index += text.length;
+      continue;
+    }
+    const quote = rest[0];
+    if (quote === '"' || quote === "'" || quote === "`") {
+      let cursor = 1;
+      while (cursor < rest.length && rest[cursor] !== quote) {
+        if (rest[cursor] === "\\") cursor++;
+        cursor++;
+      }
+      const text = rest.slice(0, Math.min(rest.length, cursor + 1));
+      push(text, "string");
+      index += text.length;
+      continue;
+    }
+    const number = /^(?:0[xXbBoO][0-9a-fA-F_]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/.exec(rest);
+    if (number && (index === 0 || !/[\w$]/.test(line[index - 1]))) {
+      push(number[0], "number");
+      index += number[0].length;
+      continue;
+    }
+    const word = /^[A-Za-z_$][\w$]*/.exec(rest);
+    if (word) {
+      const text = word[0];
+      const after = rest.slice(text.length);
+      const before = line.slice(0, index);
+      let token: CodeToken = "plain";
+      if (keywords.has(text)) token = "keyword";
+      else if (/^\($/.test(after.slice(0, 1))) token = "function";
+      else if (/^[A-Z][A-Za-z0-9_]*$/.test(text) && text.length > 1)
+        token = "type";
+      else if (/[.]$/.test(before)) token = "property";
+      else if (filetype === "yaml" && /^\s*$/.test(before) && after.startsWith(":"))
+        token = "property";
+      else if (filetype === "json" && after.startsWith('"')) token = "plain";
+      push(text, token);
+      index += text.length;
+      continue;
+    }
+    const punctuation = /^[{}()[\];,.<>=+\-*/%!&|^~?:@#]+/.exec(rest);
+    if (punctuation) {
+      push(punctuation[0], "punctuation");
+      index += punctuation[0].length;
+      continue;
+    }
+    const whitespace = /^\s+/.exec(rest);
+    if (whitespace) {
+      push(whitespace[0], "plain");
+      index += whitespace[0].length;
+      continue;
+    }
+    push(rest[0], "plain");
+    index++;
+  }
+  if (filetype === "json") {
+    // Object keys read better as properties than as strings.
+    for (const [position, span] of spans.entries()) {
+      const next = spans[position + 1];
+      if (span.token === "string" && next?.text.trimStart().startsWith(":"))
+        span.token = "property";
+    }
+  }
+  return spans;
+}
+
+// ---------------------------------------------------------------------------
+// Markdown for agent messages. Block structure plus a small inline grammar.
+
+export type InlineStyle = "plain" | "code" | "bold" | "italic" | "link";
+
+export interface InlineSpan {
+  text: string;
+  style: InlineStyle;
+}
+
+export type MarkdownLineKind =
+  | "heading"
+  | "bullet"
+  | "numbered"
+  | "quote"
+  | "code"
+  | "fence"
+  | "rule"
+  | "blank"
+  | "paragraph";
+
+export interface MarkdownLine {
+  kind: MarkdownLineKind;
+  spans: InlineSpan[];
+  level?: number;
+  language?: string;
+  marker?: string;
+  indent?: number;
+}
+
+export function parseInline(text: string): InlineSpan[] {
+  const spans: InlineSpan[] = [];
+  const push = (value: string, style: InlineStyle) => {
+    if (!value) return;
+    const last = spans[spans.length - 1];
+    if (last && last.style === style) last.text += value;
+    else spans.push({ text: value, style });
+  };
+  let index = 0;
+  while (index < text.length) {
+    const rest = text.slice(index);
+    const code = /^`([^`]+)`/.exec(rest);
+    if (code) {
+      push(code[1], "code");
+      index += code[0].length;
+      continue;
+    }
+    const bold = /^\*\*([^*]+)\*\*|^__([^_]+)__/.exec(rest);
+    if (bold) {
+      push(bold[1] ?? bold[2], "bold");
+      index += bold[0].length;
+      continue;
+    }
+    const italic = /^\*([^*\s][^*]*)\*|^_([^_\s][^_]*)_(?![\w])/.exec(rest);
+    if (italic && (index === 0 || !/\w/.test(text[index - 1]))) {
+      push(italic[1] ?? italic[2], "italic");
+      index += italic[0].length;
+      continue;
+    }
+    const link = /^\[([^\]]+)\]\(([^)]+)\)/.exec(rest);
+    if (link) {
+      push(link[1], "link");
+      index += link[0].length;
+      continue;
+    }
+    const plain = /^[^`*_\[]+|^./.exec(rest)!;
+    push(plain[0], "plain");
+    index += plain[0].length;
+  }
+  return spans;
+}
+
+export function parseMarkdown(text: string): MarkdownLine[] {
+  const lines: MarkdownLine[] = [];
+  let fence: { language: string; marker: string } | undefined;
+  for (const raw of text.replace(/\r\n/g, "\n").split("\n")) {
+    if (fence) {
+      if (raw.trim().startsWith(fence.marker)) {
+        fence = undefined;
+        continue;
+      }
+      lines.push({
+        kind: "code",
+        spans: [{ text: raw, style: "plain" }],
+        language: fence.language,
+      });
+      continue;
+    }
+    const open = /^\s*(`{3,}|~{3,})\s*(\S*)/.exec(raw);
+    if (open) {
+      fence = { language: filetypeForFence(open[2]), marker: open[1] };
+      lines.push({ kind: "fence", spans: [], language: open[2] || undefined });
+      continue;
+    }
+    if (raw.trim() === "") {
+      lines.push({ kind: "blank", spans: [] });
+      continue;
+    }
+    const heading = /^(#{1,6})\s+(.*)$/.exec(raw);
+    if (heading) {
+      lines.push({
+        kind: "heading",
+        level: heading[1].length,
+        spans: parseInline(heading[2].replace(/\s#+$/, "")),
+      });
+      continue;
+    }
+    if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(raw)) {
+      lines.push({ kind: "rule", spans: [] });
+      continue;
+    }
+    const bullet = /^(\s*)[-*+]\s+(.*)$/.exec(raw);
+    if (bullet) {
+      lines.push({
+        kind: "bullet",
+        indent: Math.floor(bullet[1].length / 2),
+        spans: parseInline(bullet[2]),
+      });
+      continue;
+    }
+    const numbered = /^(\s*)(\d+)[.)]\s+(.*)$/.exec(raw);
+    if (numbered) {
+      lines.push({
+        kind: "numbered",
+        indent: Math.floor(numbered[1].length / 2),
+        marker: `${numbered[2]}.`,
+        spans: parseInline(numbered[3]),
+      });
+      continue;
+    }
+    const quote = /^\s*>\s?(.*)$/.exec(raw);
+    if (quote) {
+      lines.push({ kind: "quote", spans: parseInline(quote[1]) });
+      continue;
+    }
+    lines.push({ kind: "paragraph", spans: parseInline(raw) });
+  }
+  return lines;
+}
+
+// ---------------------------------------------------------------------------
+// Context-window meter, palette commands, adaptive polling, sidebar ratio.
+
+export interface ContextMeter {
+  ratio: number;
+  filled: number;
+  total: number;
+  label: string;
+}
+
+export function contextMeter(
+  usage: TokenUsage | undefined,
+  cells = 8,
+): ContextMeter | undefined {
+  if (!usage?.contextWindow || !usage.totalTokens) return;
+  const ratio = Math.max(0, Math.min(1, usage.totalTokens / usage.contextWindow));
+  const filled = Math.round(ratio * cells);
+  return {
+    ratio,
+    filled,
+    total: cells,
+    label: `${formatTokenCount(usage.totalTokens)} · ${Math.round(ratio * 100)}%`,
+  };
+}
+
+export function renderMeter(meter: ContextMeter): string {
+  return `${"▰".repeat(meter.filled)}${"▱".repeat(Math.max(0, meter.total - meter.filled))}`;
+}
+
+export interface PaletteCommand {
+  id: string;
+  label: string;
+  key?: string;
+  hint?: string;
+  /** Commands that make no sense right now stay listed but disabled. */
+  disabled?: string;
+}
+
+export function filterPaletteCommands(
+  commands: readonly PaletteCommand[],
+  query: string,
+): PaletteCommand[] {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return [...commands];
+  const terms = needle.split(/\s+/);
+  const score = (command: PaletteCommand): number => {
+    const haystack = `${command.label} ${command.key ?? ""} ${command.hint ?? ""}`.toLocaleLowerCase();
+    let total = 0;
+    for (const term of terms) {
+      if (command.label.toLocaleLowerCase().startsWith(term)) total += 3;
+      else if (command.label.toLocaleLowerCase().includes(term)) total += 2;
+      else if (haystack.includes(term)) total += 1;
+      else return 0;
+    }
+    return total;
+  };
+  return commands
+    .map((command, index) => ({ command, index, score: score(command) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .map((entry) => entry.command);
+}
+
+/**
+ * Backs off diff polling while nothing changes and snaps back to the base
+ * interval as soon as the diff moves, so an idle repo costs one git spawn
+ * every few seconds instead of one per second.
+ */
+export function nextDiffPollDelay(
+  previousDelay: number,
+  changed: boolean,
+  base = 1_000,
+  maximum = 8_000,
+): number {
+  if (changed) return base;
+  return Math.min(maximum, Math.max(base, previousDelay * 2));
+}
+
+export function diffTreeWidthForRatio(
+  ratio: number | undefined,
+  containerWidth: number,
+  fallback = 30,
+): number {
+  const minimum = 20;
+  const maximum = Math.max(minimum, Math.min(60, containerWidth - 40));
+  const wanted =
+    ratio !== undefined && Number.isFinite(ratio) && ratio > 0
+      ? Math.round(ratio * containerWidth)
+      : fallback;
+  return Math.max(minimum, Math.min(maximum, wanted));
+}
+
+export function typewriterReveal(
+  revealed: number,
+  targetLength: number,
+  step = 24,
+): number {
+  if (revealed >= targetLength) return targetLength;
+  return Math.min(targetLength, revealed + step);
+}

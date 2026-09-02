@@ -334,7 +334,9 @@ divider beside the tree to reveal long paths or give the patch more room; Rudder
 remembers that width across launches. File status letters distinguish modified,
 added, deleted, and renamed paths. The patch shows old and new line numbers in
 a gutter, tints added and deleted lines, and renders each file as a banner with
-its status and line counts. Use `]c` and `[c` to move between hunks, or
+its status and line counts. Patch lines get lightweight syntax coloring by
+file extension, and files the selected session edited since it started carry
+a `●` marker in the banner and the tree. Use `]c` and `[c` to move between hunks, or
 `]f` and `[f` to move between files. Enter, Space, or `z` folds and unfolds the
 file under the cursor (clicking a file banner does the same), and `Z` folds or
 unfolds every file. The Diff tab label carries the current `+added −deleted`
@@ -348,7 +350,18 @@ pauses follow mode; click the follow indicator or press End to return to live
 output. While the selected session works, a spinner and elapsed time show in
 the tab bar, the sessions list, and the bottom of Chat and Activity. Status
 messages lead with a `✓`, `›`, `!`, or `×` glyph and clear themselves after a
-few seconds. Classic mode shows compact session metadata by default. Press `i` to
+few seconds. Chat renders agent Markdown (headings, lists, quotes, inline code,
+and fenced code with syntax coloring) and types out the newest message as it
+streams. Activity tool rows collapse to one line and expand into a card with
+the command, status, working directory, input, and output. Empty states are
+clickable: they start a session, open the prompt, or retry a failed diff read.
+Press `:`, `?`, or `Ctrl+K` for the command palette, which lists every action
+with its key and filters as you type. The prompt accepts multiple lines:
+Enter sends, and Shift+Enter, Alt+Enter, or `Ctrl+J` insert a newline. The
+meta line under the prompt shows a context-window meter that shifts from green
+to yellow to red as it fills. Rudder polls `git diff` less often while the
+tree is quiet and remembers the sidebar width as a fraction of the pane so it
+scales with the terminal. Classic mode shows compact session metadata by default. Press `i` to
 cycle through expanded, hidden, and compact metadata. Beta mode starts with
 metadata hidden and uses the same cycle.
 
