@@ -1,5 +1,4 @@
 import {
-  bg,
   BoxRenderable,
   bold,
   createCliRenderer,
@@ -17,57 +16,46 @@ import {
   TextRenderable,
   underline,
 } from "@opentui/core";
-import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   artifactAllowsTextSelection,
   AsyncTaskGate,
   attachToolDetails,
-  blendHex,
-  clampScrollOffset,
   contextMeter,
   deleteSessionArtifacts,
-  diffTreeWidthForRatio,
-  filetypeForPath,
   filterPaletteCommands,
   formatElapsed,
-  highlightCode,
-  highlightLines,
-  nextDiffPollDelay,
-  parseMarkdown,
   renderMeter,
   typewriterReveal,
-  gitDiffFileStats,
-  gitDiffGutterWidth,
-  gitDiffSummary,
   helpSegments,
-  parseGitDiffHunkHeader,
   spinnerFrame,
   statusGlyphForKind,
   statusTimeoutMs,
-  visibleGitDiffLineIndices,
   compactSessionDetails,
   continuationRunArguments,
   contextualHelp,
   dashboardNavigation,
-  diffTreeWidthForPointer,
   discoverSessions,
   emptyPromptHint,
   filterSessions,
   formatTokenUsage,
-  gitDiffTree,
   initialViewState,
   idlePromptControlArguments,
   latestAgentUpdate,
   modelPickerOptions,
   newSessionRunArguments,
-  nextGitDiffBoundary,
   nextArtifact,
   parseArguments,
   parseChatTranscript,
   parseDejaHits,
-  parseGitDiff,
   parseModelCatalog,
   parseToolEventDetails,
   parseTraceActivities,
@@ -87,22 +75,11 @@ import {
   visibleSessions,
   FALLBACK_MODELS,
   type Artifact,
-  type ChatEntry,
   type DejaHit,
   type ModelInfo,
   type PromptTarget,
   type Session,
-  type ToolEventDetail,
-  type TraceActivity,
-  type CodeSpan,
-  type CodeToken,
-  type GitDiffFileStats,
-  type InlineSpan,
-  type MarkdownLine,
   type PaletteCommand,
-  type GitDiffLine,
-  type GitDiffSummary,
-  type GitDiffTreeEntry,
   type StatusKind,
   type TUILayout,
   type ViewState,
@@ -115,170 +92,38 @@ import {
   readTUIConfig,
   resolveThemeName,
   themes,
-  type ThemePalette,
 } from "./themes";
+import { readWorkspaceDiff, touchedSince, diffCache } from "./git";
+import { diffTints, palette, setPalette } from "./palette";
+import { errorMessage, runControl } from "./process";
+import {
+  activityCopyText,
+  activitySearchText,
+  codeChunks,
+  formatDuration,
+  isLive,
+  listScrollOffset,
+  renderChatEntry,
+  renderSessionDetails,
+  renderToolDetail,
+  renderTraceActivity,
+  scrollListBy,
+  sessionStatusColor,
+  spanChunks,
+  TOOL_OUTPUT_LINES,
+} from "./render";
+import { LIVE_ROW_ID, type ActivityRow } from "./rows";
+import { createDiffView } from "./diff-view";
+import { createContextMenu, type MenuItem } from "./menu";
 
-let palette: ThemePalette = findTheme(defaultThemeName)!.palette;
 
 const ACTIVITY_HISTORY_LIMIT = 200;
 const OUTPUT_HISTORY_LINES = 1_000;
 const ARTIFACT_TAIL_BYTES = 1024 * 1024;
-const TOOL_OUTPUT_LINES = 40;
-const DIFF_MAX_BYTES = 2 * 1024 * 1024;
-const DIFF_REFRESH_MS = 1_000;
-const diffCache = new Map<
-  string,
-  { readAt: number; delay: number; result: { content: string; error?: string } }
->();
 
-async function readWorkspaceDiff(
-  cwd: string,
-  force = false,
-): Promise<{ content: string; error?: string }> {
-  const cached = diffCache.get(cwd);
-  if (cached && !force && Date.now() - cached.readAt < cached.delay)
-    return cached.result;
-  const remember = (result: { content: string; error?: string }) => {
-    const changed = !cached || cached.result.content !== result.content;
-    diffCache.set(cwd, {
-      readAt: Date.now(),
-      delay: nextDiffPollDelay(cached?.delay ?? DIFF_REFRESH_MS, changed),
-      result,
-    });
-    return result;
-  };
-
-  const run = async (arguments_: string[]): Promise<[string, number]> => {
-    const child = Bun.spawn(
-      [
-        "git",
-        "-C",
-        cwd,
-        "diff",
-        "--no-ext-diff",
-        "--no-color",
-        "--unified=3",
-        ...arguments_,
-      ],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    let truncated = false;
-    const stdoutPromise = (async () => {
-      const reader = child.stdout.getReader();
-      const decoder = new TextDecoder();
-      let size = 0;
-      let output = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const remaining = DIFF_MAX_BYTES - size;
-        if (value.byteLength > remaining) {
-          output += decoder.decode(value.subarray(0, Math.max(0, remaining)), {
-            stream: true,
-          });
-          truncated = true;
-          child.kill();
-          break;
-        }
-        size += value.byteLength;
-        output += decoder.decode(value, { stream: true });
-      }
-      output += decoder.decode();
-      if (truncated)
-        output += `\n\\ Diff truncated at ${DIFF_MAX_BYTES / 1024 / 1024} MiB`;
-      return output;
-    })();
-    const [stdout, stderr, exitCode] = await Promise.all([
-      stdoutPromise,
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    return [
-      exitCode === 0 || truncated ? stdout : stderr.trim(),
-      truncated ? 0 : exitCode,
-    ];
-  };
-
-  try {
-    const [headDiff, exitCode] = await run(["HEAD", "--"]);
-    if (exitCode === 0) return remember({ content: headDiff });
-    const [[staged, stagedExit], [unstaged, unstagedExit]] = await Promise.all([
-      run(["--cached", "--"]),
-      run(["--"]),
-    ]);
-    if (stagedExit === 0 && unstagedExit === 0)
-      return remember({
-        content: [staged, unstaged].filter(Boolean).join("\n"),
-      });
-    return remember({
-      content: "",
-      error: headDiff || "Git diff is unavailable.",
-    });
-  } catch (error) {
-    return remember({ content: "", error: errorMessage(error) });
-  }
-}
-
-/** Files whose mtime is at or after the session start: the session's edits. */
-async function touchedSince(
-  cwd: string,
-  paths: Iterable<string>,
-  startedAt: string | undefined,
-): Promise<Set<string>> {
-  const since = Date.parse(startedAt ?? "");
-  const touched = new Set<string>();
-  if (!Number.isFinite(since)) return touched;
-  await Promise.all(
-    [...paths].map(async (path) => {
-      try {
-        const info = await stat(join(cwd, path));
-        if (info.mtimeMs >= since - 1_000) touched.add(path);
-      } catch {
-        // Deleted or unreadable files stay unmarked.
-      }
-    }),
-  );
-  return touched;
-}
-
-interface ActivityRow {
-  id: string;
-  activity?: TraceActivity;
-  diff?: GitDiffLine;
-  /** Index into the full parsed diff for diff rows (folding hides rows). */
-  lineIndex?: number;
-  detail?: ToolEventDetail;
-  chat?: ChatEntry;
-  /** Animated "working" row appended while the selected session is active. */
-  live?: boolean;
-  /** Clickable rows (empty states, retry hints) run this on click or Enter. */
-  action?: () => void;
-  text: string;
-  copyText: string;
-}
 
 const ANIMATION_INTERVAL_MS = 100;
-const LIVE_ROW_ID = "live";
 
-interface DiffTints {
-  additionBg: string;
-  deletionBg: string;
-  additionGutterBg: string;
-  deletionGutterBg: string;
-  hunkBg: string;
-}
-
-function diffTintsFor(theme: ThemePalette): DiffTints {
-  return {
-    additionBg: blendHex(theme.background, theme.success, 0.14),
-    deletionBg: blendHex(theme.background, theme.danger, 0.14),
-    additionGutterBg: blendHex(theme.background, theme.success, 0.24),
-    deletionGutterBg: blendHex(theme.background, theme.danger, 0.24),
-    hunkBg: blendHex(theme.background, theme.accent, 0.08),
-  };
-}
-
-let diffTints: DiffTints = diffTintsFor(palette);
 
 // The TUI resolves "auto" once when the input opens. A status change can then
 // reject the captured command, but it can never convert prompt into steer.
@@ -293,7 +138,7 @@ async function main(): Promise<void> {
     args.theme || process.env.RUDDR_TUI_THEME || process.env.RUDDER_TUI_THEME,
     persistedConfig.theme,
   );
-  palette = findTheme(activeThemeName)!.palette;
+  setPalette(findTheme(activeThemeName)!.palette);
   const renderer = await createCliRenderer({
     screenMode: "alternate-screen",
     consoleMode: "disabled",
@@ -343,27 +188,6 @@ async function main(): Promise<void> {
     let previousRowCount = 0;
     let themePickerOpen = false;
     let themeBeforePicker = activeThemeName;
-    let diffTreeWidth = Math.max(
-      20,
-      Math.min(60, persistedConfig.diffTreeWidth ?? 30),
-    );
-    let diffDividerDragging = false;
-    let diffDividerHovered = false;
-    let diffNavigationPrefix: "[" | "]" | undefined;
-    let diffNavigationTimer: ReturnType<typeof setTimeout> | undefined;
-    const collapsedDiffDirectories = new Set<string>();
-    const collapsedDiffFiles = new Set<string>();
-    let diffLines: GitDiffLine[] = [];
-    let diffSummary: GitDiffSummary | undefined;
-    let diffFileStats = new Map<string, GitDiffFileStats>();
-    let diffGutterWidth = 2;
-    let diffError: string | undefined;
-    let diffTouchedPaths = new Set<string>();
-    // Highlight spans per parsed diff line, scanned hunk by hunk so block
-    // comments and template strings keep their color across lines.
-    let diffSpans: Array<CodeSpan[] | undefined> = [];
-    let diffTouchedSignature = "";
-    let diffTreeRatio: number | undefined = persistedConfig.diffTreeRatio;
     // Typewriter reveal for the newest agent message while a session works.
     let stream: { id: string; revealed: number; target: number } | undefined;
     const seenAgentLength = new Map<string, number>();
@@ -558,115 +382,53 @@ async function main(): Promise<void> {
         },
       },
     });
-    const diffSummaryLine = new TextRenderable(renderer, {
-      id: "diff-summary",
-      content: "",
-      fg: palette.dim,
-      height: 1,
-      width: "100%",
-      paddingLeft: 1,
-      wrapMode: "none",
-      truncate: true,
-    });
-    const diffFileList = new SelectRenderable(renderer, {
-      id: "diff-files",
-      width: "100%",
-      flexGrow: 1,
-      options: [],
-      showDescription: false,
-      showScrollIndicator: true,
-      showSelectionIndicator: true,
-      backgroundColor: palette.panel,
-      focusedBackgroundColor: palette.panel,
-      textColor: palette.dim,
-      focusedTextColor: palette.text,
-      selectedBackgroundColor: palette.selected,
-      selectedTextColor: palette.accent,
-      renderAfter(buffer) {
-        const options = this.options;
-        const visibleItems = Math.max(1, Math.floor(this.height));
-        const scrollOffset = listScrollOffset(this);
-        const addition = parseColor(palette.success);
-        const deletion = parseColor(palette.danger);
-        const labelX = 3;
-        for (const [visibleIndex, option] of options
-          .slice(scrollOffset, scrollOffset + visibleItems)
-          .entries()) {
-          const entry = option.value as GitDiffTreeEntry | undefined;
-          const match = entry ? /(\+\d+) (−\d+)$/.exec(entry.label) : null;
-          if (!match) continue;
-          if (entry && diffTouchedPaths.has(entry.path)) {
-            const indent = /^\s*/.exec(entry.label)?.[0].length ?? 0;
-            buffer.drawText("●", labelX + indent, visibleIndex, parseColor(palette.accent));
-          }
-          const countWidth = match[1].length + 1 + match[2].length;
-          const countX = Math.max(labelX, this.width - countWidth - 2);
-          if (entry?.status) {
-            const statusColor =
-              entry.status === "A"
-                ? addition
-                : entry.status === "D"
-                  ? deletion
-                  : parseColor(
-                      entry.status === "R" ? palette.warning : palette.accent,
-                    );
-            buffer.drawText(entry.status, Math.max(labelX, countX - 3), visibleIndex, statusColor);
-          }
-          buffer.drawText(match[1], countX, visibleIndex, addition);
-          buffer.drawText(
-            match[2],
-            countX + match[1].length + 1,
-            visibleIndex,
-            deletion,
-          );
-        }
-      },
-    });
-    const diffSidebar = new BoxRenderable(renderer, {
-      id: "diff-sidebar",
-      width: 30,
-      height: "100%",
-      flexShrink: 0,
-      flexDirection: "column",
-      backgroundColor: palette.panel,
-      visible: false,
-    });
-    diffSidebar.add(diffSummaryLine);
-    diffSidebar.add(diffFileList);
-    const diffDivider = new BoxRenderable(renderer, {
-      id: "diff-divider",
-      width: 1,
-      height: "100%",
-      flexShrink: 0,
-      backgroundColor: palette.background,
-      visible: false,
-      renderAfter(buffer) {
-        const color = parseColor(
-          diffDividerDragging || diffDividerHovered
-            ? palette.accent
-            : palette.border,
-        );
-        const gripStart = Math.max(0, Math.floor(this.height / 2) - 1);
-        const active = diffDividerDragging || diffDividerHovered;
-        for (let y = 0; y < this.height; y++) {
-          const grip = y >= gripStart && y < gripStart + 3;
-          buffer.drawText(
-            grip ? "┃" : "┆",
-            0,
-            y,
-            grip && !active ? parseColor(palette.dim) : color,
-          );
-        }
-      },
-    });
     const artifactBody = new BoxRenderable(renderer, {
       width: "100%",
       flexGrow: 1,
       flexDirection: "row",
       gap: 0,
     });
-    artifactBody.add(diffSidebar);
-    artifactBody.add(diffDivider);
+    const diffView = createDiffView({
+      renderer,
+      artifactScroll,
+      artifactBody,
+      isActive: () => view.artifact === "diff",
+      rows: () => artifactRows,
+      selectedRow: () => selectedRow,
+      setSelectedRow: (index) => {
+        selectedRow = index;
+      },
+      setRows: (rows) => setArtifactRows(rows),
+      renderRows: (preserveScroll) => renderArtifactRows(preserveScroll),
+      refreshRow: (index) => refreshArtifactRow(index),
+      stopFollowing: () => {
+        artifactFollowing = false;
+        artifactScroll.stickyScroll = false;
+      },
+      invalidateRows: () => {
+        artifactSignature = "";
+      },
+      reloadSelected: () => void updateSelectedSession(),
+      activateSelectedRow: () => activateSelectedRow(),
+      selectedSession: () => selectedSession(),
+      setStatus: (message, kind) => setStatus(message, kind),
+      updateChrome: () => updateChrome(),
+      copyText: (value) => copyText(value),
+      persistSidebar: (width, ratio) => {
+        persistedConfig.diffTreeRatio = ratio;
+        persistedConfig.diffTreeWidth = width;
+        void persistTUIConfig({
+          ...persistedConfig,
+          theme: activeThemeName,
+          diffTreeWidth: width,
+          ...(ratio !== undefined ? { diffTreeRatio: ratio } : {}),
+        }).catch((error) =>
+          setStatus(`Sidebar resized, but could not save: ${errorMessage(error)}`, true),
+        );
+      },
+      initialTreeWidth: Math.max(20, Math.min(60, persistedConfig.diffTreeWidth ?? 30)),
+      initialTreeRatio: persistedConfig.diffTreeRatio,
+    });
     artifactBody.add(artifactScroll);
     // Borderless main surface: the conversation floats on the background the
     // way opencode's does; the prompt input is the only framed element.
@@ -895,92 +657,7 @@ async function main(): Promise<void> {
     let paletteOpen = false;
     let paletteCommands: PaletteCommand[] = [];
 
-    // Right-click context menu. Items are plain closures; a destructive item
-    // swaps the menu for a confirm/cancel pair instead of acting at once.
-    interface MenuItem {
-      label: string;
-      hint?: string;
-      danger?: boolean;
-      run: () => void | Promise<void>;
-    }
-    const contextList = new SelectRenderable(renderer, {
-      id: "context-menu",
-      width: "100%",
-      flexGrow: 1,
-      options: [],
-      showDescription: true,
-      wrapSelection: true,
-      backgroundColor: palette.panel,
-      focusedBackgroundColor: palette.panel,
-      textColor: palette.text,
-      focusedTextColor: palette.text,
-      descriptionColor: palette.dim,
-      selectedDescriptionColor: palette.text,
-      selectedBackgroundColor: palette.selected,
-      selectedTextColor: palette.accent,
-      showScrollIndicator: false,
-    });
-    const contextPanel = new BoxRenderable(renderer, {
-      id: "context-panel",
-      position: "absolute",
-      left: 0,
-      top: 0,
-      width: 44,
-      height: 6,
-      zIndex: 30,
-      border: true,
-      borderStyle: "rounded",
-      borderColor: palette.accent,
-      backgroundColor: palette.panel,
-      visible: false,
-    });
-    contextPanel.add(contextList);
-    let contextItems: MenuItem[] = [];
-    let contextOpen = false;
-    let contextOpenedAt = 0;
-
-    function openContextMenu(items: MenuItem[], x: number, y: number, title = ""): void {
-      if (items.length === 0) return;
-      contextItems = items;
-      const width = Math.min(
-        renderer.width - 2,
-        Math.max(28, ...items.map((item) => Math.max(item.label.length, (item.hint ?? "").length) + 6)),
-      );
-      const height = Math.min(renderer.height - 2, items.length * 2 + 2);
-      contextPanel.width = width;
-      contextPanel.height = height;
-      contextPanel.left = Math.max(0, Math.min(x, renderer.width - width - 1));
-      contextPanel.top = Math.max(0, Math.min(y, renderer.height - height - 1));
-      contextPanel.title = title ? ` ${title} ` : "";
-      contextList.options = items.map((item, index) => ({
-        name: item.danger ? `⚠ ${item.label}` : item.label,
-        description: item.hint ?? "",
-        value: String(index),
-      }));
-      contextList.setSelectedIndex(0);
-      contextOpen = true;
-      contextOpenedAt = Date.now();
-      contextPanel.visible = true;
-      contextList.focus();
-    }
-
-    function closeContextMenu(): void {
-      if (!contextOpen) return;
-      contextOpen = false;
-      contextPanel.visible = false;
-      focusCurrentPanel();
-    }
-
-    function runContextItem(index = contextList.getSelectedIndex()): void {
-      const item = contextItems[index];
-      closeContextMenu();
-      if (item) void item.run();
-    }
-    contextPanel.onMouseDown = (event) => {
-      const clicked = Math.floor((event.y - contextPanel.y - 1) / 2);
-      if (clicked >= 0 && clicked < contextItems.length) runContextItem(clicked);
-      event.preventDefault();
-    };
+    const contextMenu = createContextMenu(renderer, () => focusCurrentPanel());
 
     const modelPicker = new SelectRenderable(renderer, {
       id: "model-picker",
@@ -1104,7 +781,7 @@ async function main(): Promise<void> {
     if (layout === "beta") root.add(sessionsPanel);
     root.add(searchPanel);
     root.add(palettePanel);
-    root.add(contextPanel);
+    root.add(contextMenu.panel);
     root.add(themePanel);
     root.add(modelPanel);
     root.add(dejaPanel);
@@ -1112,13 +789,8 @@ async function main(): Promise<void> {
     // Mouse events bubble here last; a click anywhere outside the open menu
     // dismisses it. The opening click itself bubbles too, hence the delay.
     root.onMouseDown = (event) => {
-      if (!contextOpen || Date.now() - contextOpenedAt < 150) return;
-      const inside =
-        event.x >= contextPanel.x &&
-        event.x < contextPanel.x + contextPanel.width &&
-        event.y >= contextPanel.y &&
-        event.y < contextPanel.y + contextPanel.height;
-      if (!inside) closeContextMenu();
+      if (!contextMenu.open || contextMenu.ageMs() < 150) return;
+      if (!contextMenu.contains(event.x, event.y)) contextMenu.close();
     };
     artifactScroll.focus();
     view = { ...view, focus: "artifact" };
@@ -1161,7 +833,7 @@ async function main(): Promise<void> {
       if (event.button === 2) {
         event.preventDefault();
         const session = sessions[clickedIndex];
-        if (session) openContextMenu(sessionMenu(session), event.x, event.y, sessionMenuTitle(session));
+        if (session) contextMenu.show(sessionMenu(session), event.x, event.y, sessionMenuTitle(session));
       }
     };
 
@@ -1231,9 +903,9 @@ async function main(): Promise<void> {
     }
 
     function confirmDelete(targets: Session[], question: string): void {
-      const x = contextPanel.left as number;
-      const y = contextPanel.top as number;
-      openContextMenu(
+      const x = contextMenu.left;
+      const y = contextMenu.top;
+      contextMenu.show(
         [
           {
             label: `Yes, delete ${targets.length === 1 ? "it" : `${targets.length} sessions`}`,
@@ -1287,169 +959,6 @@ async function main(): Promise<void> {
       focusArtifact();
       setTimeout(updateFollowFromPosition, 0);
     };
-    diffFileList.onMouseScroll = (event) => {
-      const steps = Math.max(1, Math.round(event.scroll?.delta ?? 1));
-      const direction =
-        event.scroll?.direction === "up" ? -1 : event.scroll?.direction === "down" ? 1 : 0;
-      if (direction !== 0) scrollListBy(diffFileList, direction * steps, 1);
-    };
-    diffDivider.onMouseOver = () => {
-      diffDividerHovered = true;
-      diffDivider.requestRender();
-    };
-    diffDivider.onMouseOut = () => {
-      diffDividerHovered = false;
-      diffDivider.requestRender();
-    };
-    const resizeDiffTree = (pointerX: number) => {
-      diffTreeWidth = diffTreeWidthForPointer(
-        pointerX,
-        artifactBody.x,
-        artifactBody.width,
-      );
-      diffSidebar.width = diffTreeWidth;
-      diffDivider.requestRender();
-      updateDiffFileTree();
-    };
-    const finishDiffTreeDrag = () => {
-      if (!diffDividerDragging) return;
-      diffDividerDragging = false;
-      diffDivider.requestRender();
-      if (artifactBody.width > 0) diffTreeRatio = diffTreeWidth / artifactBody.width;
-      persistedConfig.diffTreeRatio = diffTreeRatio;
-      persistedConfig.diffTreeWidth = diffTreeWidth;
-      void persistTUIConfig({
-        ...persistedConfig,
-        theme: activeThemeName,
-        diffTreeWidth,
-        ...(diffTreeRatio !== undefined ? { diffTreeRatio } : {}),
-      }).catch((error) =>
-        setStatus(`Sidebar resized, but could not save: ${errorMessage(error)}`, true),
-      );
-    };
-    diffDivider.onMouseDown = (event) => {
-      diffDividerDragging = true;
-      diffDivider.requestRender();
-      resizeDiffTree(event.x);
-      event.preventDefault();
-    };
-    artifactBody.onMouseDrag = (event) => {
-      if (diffDividerDragging) resizeDiffTree(event.x);
-    };
-    artifactBody.onMouseDragEnd = finishDiffTreeDrag;
-    artifactBody.onMouseUp = finishDiffTreeDrag;
-    diffFileList.onMouseDown = (event) => {
-      diffFileList.focus();
-      const options = diffFileList.options;
-      const scrollOffset = listScrollOffset(diffFileList);
-      const clickedIndex =
-        scrollOffset + Math.floor(event.y - diffFileList.y);
-      if (clickedIndex >= 0 && clickedIndex < options.length) {
-        diffFileList.setSelectedIndex(clickedIndex);
-        activateDiffTreeEntry(options[clickedIndex]?.value, true);
-      }
-    };
-    diffFileList.on(SelectRenderableEvents.SELECTION_CHANGED, (_index, option) => {
-      activateDiffTreeEntry(option?.value, false);
-    });
-    diffFileList.on(SelectRenderableEvents.ITEM_SELECTED, (_index, option) => {
-      activateDiffTreeEntry(option?.value, true);
-    });
-    function activateDiffTreeEntry(value: unknown, toggleDirectory: boolean): void {
-      const entry = value as GitDiffTreeEntry | undefined;
-      if (!entry || view.artifact !== "diff") return;
-      if (entry.kind === "directory") {
-        if (!toggleDirectory) return;
-        if (collapsedDiffDirectories.has(entry.path))
-          collapsedDiffDirectories.delete(entry.path);
-        else collapsedDiffDirectories.add(entry.path);
-        updateDiffFileTree(entry.path);
-        return;
-      }
-      jumpToDiffLine(entry.rowIndex);
-    }
-    /** Jump to a row by its index in the full parsed diff (tree row index). */
-    function jumpToDiffLine(lineIndex: unknown): void {
-      if (view.artifact !== "diff" || typeof lineIndex !== "number") return;
-      const rowIndex = artifactRows.findIndex(
-        (row) => row.lineIndex === lineIndex,
-      );
-      if (rowIndex < 0) return;
-      jumpToDiffRow(rowIndex);
-    }
-    function jumpToDiffRow(rowIndex: number): void {
-      if (view.artifact !== "diff") return;
-      const previousRow = selectedRow;
-      selectedRow = rowIndex;
-      artifactFollowing = false;
-      artifactScroll.stickyScroll = false;
-      refreshArtifactRow(previousRow);
-      refreshArtifactRow(selectedRow);
-      artifactScroll.scrollTo({ x: 0, y: Math.max(0, selectedRow - 1) });
-      updateChrome();
-    }
-
-    // Diff rows carry placeholder context lines for the blank spacer rows so
-    // boundary search keeps working on the visible row list.
-    function diffRowLines(): GitDiffLine[] {
-      return artifactRows.map(
-        (row) => row.diff ?? { kind: "context", text: "" },
-      );
-    }
-
-    function moveToDiffBoundary(kind: "hunk" | "file", direction: number): void {
-      const lines = diffRowLines();
-      const target = nextGitDiffBoundary(lines, selectedRow, kind, direction);
-      if (target === undefined) {
-        setStatus(`No diff ${kind}s`, true);
-        return;
-      }
-      jumpToDiffRow(target);
-      syncDiffTreeToRow(target);
-      const boundaries = lines.flatMap((line, index) =>
-        line.kind === kind ? [index] : [],
-      );
-      setStatus(`${kind === "hunk" ? "Hunk" : "File"} ${boundaries.indexOf(target) + 1} of ${boundaries.length}`);
-    }
-
-    function syncDiffTreeToRow(rowIndex: number): void {
-      const path = artifactRows[rowIndex]?.diff?.path;
-      if (!path) return;
-      const optionIndex = diffFileList.options.findIndex(
-        (option) =>
-          (option.value as GitDiffTreeEntry | undefined)?.kind === "file" &&
-          (option.value as GitDiffTreeEntry).path === path,
-      );
-      if (optionIndex >= 0 && optionIndex !== diffFileList.getSelectedIndex())
-        diffFileList.setSelectedIndex(optionIndex);
-    }
-
-    function toggleDiffFile(path: string): void {
-      if (view.artifact !== "diff") return;
-      const folded = !collapsedDiffFiles.has(path);
-      if (folded) collapsedDiffFiles.add(path);
-      else collapsedDiffFiles.delete(path);
-      setArtifactRows(buildDiffRows());
-      const headerRow = artifactRows.findIndex(
-        (row) => row.diff?.kind === "file" && row.diff.path === path,
-      );
-      if (headerRow >= 0) jumpToDiffRow(headerRow);
-      updateDiffFileTree(path);
-      setStatus(`${folded ? "Folded" : "Unfolded"} ${path}`);
-    }
-
-    function toggleAllDiffFiles(): void {
-      if (view.artifact !== "diff" || diffLines.length === 0) return;
-      const paths = [...diffFileStats.keys()];
-      const foldAll = collapsedDiffFiles.size < paths.length;
-      collapsedDiffFiles.clear();
-      if (foldAll) for (const path of paths) collapsedDiffFiles.add(path);
-      setArtifactRows(buildDiffRows());
-      if (selectedRow >= artifactRows.length) selectedRow = 0;
-      renderArtifactRows(true);
-      updateDiffFileTree();
-      setStatus(foldAll ? "Folded every file" : "Unfolded every file");
-    }
     renderer.on("resize", () => {
       updateChrome();
       if (view.artifact !== "diff") applySessionFilter();
@@ -1509,13 +1018,13 @@ async function main(): Promise<void> {
         void shutdown();
         return;
       }
-      if (contextOpen) {
+      if (contextMenu.open) {
         key.preventDefault();
         key.stopPropagation();
-        if (key.name === "escape" || key.name === "q") closeContextMenu();
-        else if (key.name === "return" || key.name === "enter") runContextItem();
-        else if (key.name === "up" || key.name === "k") contextList.moveUp(1);
-        else if (key.name === "down" || key.name === "j") contextList.moveDown(1);
+        if (key.name === "escape" || key.name === "q") contextMenu.close();
+        else if (key.name === "return" || key.name === "enter") contextMenu.run();
+        else if (key.name === "up" || key.name === "k") contextMenu.moveUp();
+        else if (key.name === "down" || key.name === "j") contextMenu.moveDown();
         return;
       }
       if (paletteOpen) {
@@ -1625,42 +1134,14 @@ async function main(): Promise<void> {
         return;
       }
 
-      if (view.focus === "artifact" && view.artifact === "diff") {
-        if (key.name === "[" || key.name === "]") {
-          key.preventDefault();
-          key.stopPropagation();
-          diffNavigationPrefix = key.name;
-          if (diffNavigationTimer) clearTimeout(diffNavigationTimer);
-          diffNavigationTimer = setTimeout(() => {
-            diffNavigationPrefix = undefined;
-          }, 1_200);
-          setStatus(`${key.name}c hunk · ${key.name}f file`);
-          return;
-        }
-        if (diffNavigationPrefix && (key.name === "c" || key.name === "f")) {
-          key.preventDefault();
-          key.stopPropagation();
-          const direction = diffNavigationPrefix === "]" ? 1 : -1;
-          const kind = key.name === "c" ? "hunk" : "file";
-          diffNavigationPrefix = undefined;
-          if (diffNavigationTimer) clearTimeout(diffNavigationTimer);
-          moveToDiffBoundary(kind, direction);
-          return;
-        }
-        diffNavigationPrefix = undefined;
-        if (diffNavigationTimer) clearTimeout(diffNavigationTimer);
-        if (key.name === "z" && key.shift) {
-          key.preventDefault();
-          key.stopPropagation();
-          toggleAllDiffFiles();
-          return;
-        }
-        if (key.name === "z" || key.name === "space") {
-          key.preventDefault();
-          key.stopPropagation();
-          activateSelectedRow();
-          return;
-        }
+      if (
+        view.focus === "artifact" &&
+        view.artifact === "diff" &&
+        diffView.handleKey(key)
+      ) {
+        key.preventDefault();
+        key.stopPropagation();
+        return;
       }
 
       const navigation = dashboardNavigation(layout, view.focus, key.name);
@@ -1787,7 +1268,7 @@ async function main(): Promise<void> {
       const theme = findTheme(name);
       if (!theme) return;
       activeThemeName = theme.name;
-      palette = theme.palette;
+      setPalette(theme.palette);
       renderer.setBackgroundColor(palette.background);
       root.backgroundColor = palette.background;
       rightColumn.backgroundColor = palette.background;
@@ -1800,17 +1281,7 @@ async function main(): Promise<void> {
       sessionList.selectedDescriptionColor = palette.text;
       sessionList.selectedBackgroundColor = palette.selected;
       sessionList.selectedTextColor = palette.accent;
-      diffFileList.backgroundColor = palette.panel;
-      diffFileList.focusedBackgroundColor = palette.panel;
-      diffFileList.textColor = palette.dim;
-      diffFileList.focusedTextColor = palette.text;
-      diffFileList.selectedBackgroundColor = palette.selected;
-      diffFileList.selectedTextColor = palette.accent;
-      diffDivider.backgroundColor = palette.background;
-      diffDivider.requestRender();
-      diffSidebar.backgroundColor = palette.panel;
-      diffSummaryLine.fg = palette.dim;
-      diffTints = diffTintsFor(palette);
+      diffView.applyTheme();
       workingIndicator.fg = palette.success;
       sessionsPanel.borderColor = palette.border;
       sessionsPanel.focusedBorderColor = palette.accent;
@@ -1862,17 +1333,7 @@ async function main(): Promise<void> {
       promptInput.textColor = palette.text;
       promptInput.focusedTextColor = palette.text;
       promptInput.placeholderColor = palette.dim;
-      contextPanel.backgroundColor = palette.panel;
-      contextPanel.borderColor = palette.accent;
-      contextPanel.titleColor = palette.accent;
-      contextList.backgroundColor = palette.panel;
-      contextList.focusedBackgroundColor = palette.panel;
-      contextList.textColor = palette.text;
-      contextList.focusedTextColor = palette.text;
-      contextList.descriptionColor = palette.dim;
-      contextList.selectedDescriptionColor = palette.text;
-      contextList.selectedBackgroundColor = palette.selected;
-      contextList.selectedTextColor = palette.accent;
+      contextMenu.applyTheme();
       palettePanel.backgroundColor = palette.background;
       palettePanel.borderColor = palette.accent;
       palettePanel.titleColor = palette.accent;
@@ -1981,7 +1442,7 @@ async function main(): Promise<void> {
         case "tab-trace": setArtifact("trace"); break;
         case "tab-output": setArtifact("output"); break;
         case "tab-diff": setArtifact("diff"); break;
-        case "fold": toggleAllDiffFiles(); break;
+        case "fold": diffView.toggleAll(); break;
         case "search": focusArtifact(); openSearch(); break;
         case "filter": focusSessions(); openSearch(); break;
         case "follow": resumeFollowing(); break;
@@ -2819,95 +2280,16 @@ async function main(): Promise<void> {
             ];
         setArtifactRows(rows);
       } else {
-        diffLines = parseGitDiff(diffResult?.content ?? "");
-        diffSummary = gitDiffSummary(diffLines);
-        diffFileStats = gitDiffFileStats(diffLines);
-        diffGutterWidth = gitDiffGutterWidth(diffLines);
-        diffSpans = highlightDiffLines(diffLines);
-        diffError =
-          diffResult?.error ??
-          (session.cwd ? undefined : "This session has no working directory.");
-        for (const path of collapsedDiffFiles)
-          if (!diffFileStats.has(path)) collapsedDiffFiles.delete(path);
-        const touchedSignature = `${session.stateDir}:${session.startedAt}:${[...diffFileStats.keys()].join("\u0000")}:${diffResult?.content.length ?? 0}`;
-        if (touchedSignature !== diffTouchedSignature && session.cwd) {
-          diffTouchedSignature = touchedSignature;
-          diffTouchedPaths = await touchedSince(
-            session.cwd,
-            diffFileStats.keys(),
-            session.startedAt,
-          );
-          if (session.stateDir !== view.selectedStateDir) return;
-          artifactSignature = "";
-        }
-        setArtifactRows(buildDiffRows());
+        const current = await diffView.load(
+          session,
+          diffResult,
+          () => session.stateDir === view.selectedStateDir,
+        );
+        if (!current) return;
+        setArtifactRows(diffView.buildRows());
       }
     }
 
-
-    function highlightDiffLines(lines: readonly GitDiffLine[]): Array<CodeSpan[] | undefined> {
-      const result: Array<CodeSpan[] | undefined> = new Array(lines.length);
-      let hunkStart = -1;
-      const flush = (end: number) => {
-        if (hunkStart < 0) return;
-        const filetype = filetypeForPath(lines[hunkStart].path);
-        const contentLines = lines.slice(hunkStart, end).map((line) => line.text.slice(1));
-        const spans = highlightLines(contentLines, filetype);
-        for (const [offset, lineSpans] of spans.entries()) result[hunkStart + offset] = lineSpans;
-        hunkStart = -1;
-      };
-      for (const [index, line] of lines.entries()) {
-        const isContent =
-          line.kind === "addition" || line.kind === "deletion" || line.kind === "context";
-        if (isContent) {
-          if (hunkStart < 0) hunkStart = index;
-        } else flush(index);
-      }
-      flush(lines.length);
-      return result;
-    }
-
-    function buildDiffRows(): ActivityRow[] {
-      if (diffLines.length === 0) {
-        if (diffError)
-          return [
-            { id: "empty", text: `× ${diffError}`, copyText: "" },
-            {
-              id: "empty-action",
-              text: "  Click here or press Enter to retry.",
-              copyText: "",
-              action: () => {
-                const cwd = selectedSession()?.cwd;
-                if (cwd) diffCache.delete(cwd);
-                artifactSignature = "";
-                void updateSelectedSession();
-              },
-            },
-          ];
-        return [
-          { id: "empty", text: "✓ Working tree matches HEAD", copyText: "" },
-          {
-            id: "empty-hint",
-            text: "  Tracked changes appear here as the session edits files. Untracked files are not shown.",
-            copyText: "",
-          },
-        ];
-      }
-      const rows: ActivityRow[] = [];
-      for (const index of visibleGitDiffLineIndices(diffLines, collapsedDiffFiles)) {
-        const diff = diffLines[index];
-        if (diff.kind === "file" && rows.length > 0)
-          rows.push({ id: `diff-gap:${diff.path}`, text: "", copyText: "" });
-        rows.push({
-          id: `diff:${index}:${diff.text}`,
-          diff,
-          lineIndex: index,
-          text: diff.text,
-          copyText: diff.text,
-        });
-      }
-      return rows;
-    }
 
     function liveRow(session: Session | undefined): ActivityRow[] {
       return session?.status === "active" || session?.status === "starting"
@@ -2919,21 +2301,7 @@ async function main(): Promise<void> {
       const items: MenuItem[] = [];
       if (row.copyText)
         items.push({ label: "Copy row", run: () => copyText(row.copyText) });
-      if (row.diff?.path) {
-        const path = row.diff.path;
-        items.push(
-          {
-            label: collapsedDiffFiles.has(path) ? "Unfold file" : "Fold file",
-            hint: path,
-            run: () => toggleDiffFile(path),
-          },
-          {
-            label: collapsedDiffFiles.size < diffFileStats.size ? "Fold every file" : "Unfold every file",
-            run: () => toggleAllDiffFiles(),
-          },
-          { label: "Copy file path", hint: path, run: () => copyText(path) },
-        );
-      }
+      items.push(...diffView.menuItems(row));
       if (row.activity?.kind === "tool")
         items.push({
           label: expandedToolIDs.has(row.id) ? "Collapse tool" : "Expand tool",
@@ -2949,7 +2317,7 @@ async function main(): Promise<void> {
       const row = artifactRows[selectedRow];
       if (!row) return;
       if (row.action) row.action();
-      else if (row.diff?.path) toggleDiffFile(row.diff.path);
+      else if (row.diff?.path) diffView.toggleFile(row.diff.path);
       else toggleSelectedTool();
     }
 
@@ -2964,58 +2332,12 @@ async function main(): Promise<void> {
       if (!artifactFollowing && artifactSignature)
         unseenRows += Math.max(0, rows.length - previousRowCount);
       artifactRows = rows;
-      if (view.artifact === "diff") updateDiffFileTree();
+      if (view.artifact === "diff") diffView.refreshTree();
       previousRowCount = rows.length;
       artifactSignature = nextSignature;
       if (selectedRow >= rows.length) selectedRow = rows.length - 1;
       renderArtifactRows(true);
       updateChrome();
-    }
-
-    function updateDiffFileTree(selectedPath?: string): void {
-      const entries = gitDiffTree(
-        diffLines,
-        collapsedDiffDirectories,
-        collapsedDiffFiles,
-      );
-      diffFileList.options = entries.map((entry) => ({
-        name: entry.kind === "file" ? diffTreeFileName(entry) : entry.label,
-        description: "",
-        value: entry,
-      }));
-      updateDiffSummaryLine();
-      if (selectedPath) {
-        const selectedIndex = entries.findIndex(
-          (entry) => entry.path === selectedPath,
-        );
-        if (selectedIndex >= 0) diffFileList.setSelectedIndex(selectedIndex);
-      }
-    }
-
-    // Leaves a fixed column free on the right for "M  +12 −3" so the counts
-    // drawn by renderAfter never overlap a long file name.
-    function diffTreeFileName(entry: GitDiffTreeEntry): string {
-      const match = /^(\s*)  󰈔 (.+?)  [MADR]  (\+\d+ −\d+)$/.exec(entry.label);
-      if (!match) return entry.label;
-      const [, indent, name, counts] = match;
-      const icon = entry.collapsed ? "▸" : "󰈔";
-      const reserved = counts.length + 4 + 4; // status letter, gaps, indicator
-      const available = Math.max(6, diffTreeWidth - 3 - indent.length - 4 - reserved);
-      const shown =
-        name.length <= available
-          ? name
-          : `${name.slice(0, Math.max(1, Math.ceil((available - 1) / 2)))}…${name.slice(-(Math.floor((available - 1) / 2)))}`;
-      return `${indent}  ${icon} ${shown}`;
-    }
-
-    function updateDiffSummaryLine(): void {
-      if (!diffSummary || diffSummary.files === 0) {
-        diffSummaryLine.content = t`${fg(palette.dim)("no changes")}`;
-        return;
-      }
-      const folded =
-        collapsedDiffFiles.size > 0 ? ` · ${collapsedDiffFiles.size} folded` : "";
-      diffSummaryLine.content = t`${fg(palette.text)(`${diffSummary.files} ${diffSummary.files === 1 ? "file" : "files"}`)} ${fg(palette.success)(`+${diffSummary.additions}`)} ${fg(palette.danger)(`−${diffSummary.deletions}`)}${fg(palette.dim)(folded)}`;
     }
 
     function renderArtifactRows(preserveScroll: boolean): void {
@@ -3030,7 +2352,7 @@ async function main(): Promise<void> {
         // wrap; pin prose rows to the viewport width instead.
         const renderable = new TextRenderable(renderer, {
           id: `artifact-row-${index}`,
-          width: view.artifact === "diff" ? diffRowWidth(row) : proseRowWidth(),
+          width: view.artifact === "diff" ? diffView.rowWidth(row) : proseRowWidth(),
           wrapMode: view.artifact === "diff" ? "none" : "word",
           content: renderArtifactRow(row, match, index === selectedRow),
           fg: palette.text,
@@ -3047,16 +2369,16 @@ async function main(): Promise<void> {
           if (event.button === 2) {
             refreshArtifactRow(index);
             event.preventDefault();
-            openContextMenu(artifactRowMenu(row), event.x, event.y);
+            contextMenu.show(artifactRowMenu(row), event.x, event.y);
             return;
           }
           if (row.action) row.action();
           else if (row.activity?.kind === "tool") toggleTool(row.id);
           else if (row.diff?.kind === "file" && row.diff.path)
-            toggleDiffFile(row.diff.path);
+            diffView.toggleFile(row.diff.path);
           else {
             refreshArtifactRow(index);
-            if (row.diff) syncDiffTreeToRow(index);
+            if (row.diff) diffView.syncTreeToRow(index);
           }
         };
         artifactScroll.add(renderable);
@@ -3092,9 +2414,9 @@ async function main(): Promise<void> {
         ]);
       if (row.live)
         return t`${fg(palette.success)(spinnerFrame(animationTick))} ${italic(fg(palette.dim)(liveRowText()))}`;
-      if (row.diff) return renderDiffRow(row, match, selected);
+      if (row.diff) return diffView.renderRow(row, match, selected);
       if (view.artifact === "diff" && row.id.startsWith("diff-gap:"))
-        return renderDiffSpacerRow(row, selected);
+        return diffView.renderSpacerRow(row, selected);
       if (view.artifact === "output" || !row.activity) {
         // Empty-state rows lead with a status glyph; color it like a toast.
         const glyphColor = row.text.startsWith("✓ ")
@@ -3129,131 +2451,11 @@ async function main(): Promise<void> {
       return `${verb} · ${elapsed}`;
     }
 
-    function renderDiffSpacerRow(row: ActivityRow, selected: boolean): StyledText {
-      const width = diffRowWidth(row);
-      const text = " ".repeat(width);
-      return selected ? t`${bg(palette.selected)(text)}` : t`${text}`;
-    }
-
-    function padCells(text: string, width: number): string {
-      const missing = width - [...text].length;
-      return missing > 0 ? text + " ".repeat(missing) : text;
-    }
-
-    function renderDiffRow(
-      row: ActivityRow,
-      match: boolean,
-      selected: boolean,
-    ): StyledText {
-      const diff = row.diff!;
-      const width = diffRowWidth(row);
-      const gutterWidth = diffGutterWidth;
-      const blankGutter = " ".repeat(diffGutterCells());
-      const markerText = match ? "◆" : " ";
-      const markerColor = match ? palette.warning : palette.dim;
-
-      if (diff.kind === "file") {
-        const path = diff.path ?? diff.text;
-        const stats = diffFileStats.get(path);
-        const folded = collapsedDiffFiles.has(path);
-        const rowBg = selected ? palette.selected : palette.panel;
-        const statusColor =
-          stats?.status === "A"
-            ? palette.success
-            : stats?.status === "D"
-              ? palette.danger
-              : stats?.status === "R"
-                ? palette.warning
-                : palette.accent;
-        const head = ` ${folded ? "▸" : "▾"} ${path}`;
-        const counts = stats
-          ? `  ${stats.status}  +${stats.additions} −${stats.deletions}`
-          : "";
-        const tail = padCells("", Math.max(0, width - [...head].length - [...counts].length - (folded ? 9 : 0) - (diffTouchedPaths.has(path) ? 16 : 0)));
-        const chunks = [
-          ...t`${bg(rowBg)(fg(markerColor)(markerText))}${bg(rowBg)(bold(fg(palette.accent)(head)))}`.chunks,
-        ];
-        if (stats)
-          chunks.push(
-            ...t`${bg(rowBg)(fg(palette.dim)("  "))}${bg(rowBg)(bold(fg(statusColor)(stats.status)))}${bg(rowBg)(fg(palette.dim)("  "))}${bg(rowBg)(fg(palette.success)(`+${stats.additions}`))}${bg(rowBg)(fg(palette.dim)(" "))}${bg(rowBg)(fg(palette.danger)(`−${stats.deletions}`))}`
-              .chunks,
-          );
-        if (folded)
-          chunks.push(...t`${bg(rowBg)(italic(fg(palette.dim)("  folded")))}`.chunks);
-        if (diffTouchedPaths.has(path))
-          chunks.push(
-            ...t`${bg(rowBg)(fg(palette.dim)("  "))}${bg(rowBg)(fg(palette.accent)("●"))}${bg(rowBg)(fg(palette.dim)(" this session"))}`
-              .chunks,
-          );
-        chunks.push(...t`${bg(rowBg)(tail)}`.chunks);
-        return new StyledText(chunks);
-      }
-
-      if (diff.kind === "hunk") {
-        const header = parseGitDiffHunkHeader(diff.text);
-        const rowBg = selected ? palette.selected : diffTints.hunkBg;
-        const range = header
-          ? `@@ -${header.oldStart},${header.oldCount} +${header.newStart},${header.newCount} @@`
-          : diff.text;
-        const context = header?.context ? ` ${header.context}` : "";
-        const body = ` ${range}${context}`;
-        const tail = padCells("", Math.max(0, width - diffGutterCells() - 1 - [...body].length));
-        return t`${bg(rowBg)(fg(markerColor)(markerText))}${bg(rowBg)(fg(palette.dim)(blankGutter.slice(1)))}${bg(rowBg)(fg(palette.accent)(` ${range}`))}${bg(rowBg)(italic(fg(palette.dim)(context)))}${bg(rowBg)(tail)}`;
-      }
-
-      if (diff.kind === "metadata") {
-        const rowBg = selected ? palette.selected : palette.background;
-        const body = ` ${diff.text}`;
-        const tail = padCells("", Math.max(0, width - diffGutterCells() - 1 - [...body].length));
-        return t`${bg(rowBg)(fg(markerColor)(markerText))}${bg(rowBg)(blankGutter.slice(1))}${bg(rowBg)(fg(palette.dim)(body))}${bg(rowBg)(tail)}`;
-      }
-
-      const oldNumber =
-        diff.oldLine === undefined ? "" : String(diff.oldLine);
-      const newNumber =
-        diff.newLine === undefined ? "" : String(diff.newLine);
-      const gutter = `${oldNumber.padStart(gutterWidth)} ${newNumber.padStart(gutterWidth)} `;
-      const sign = diff.text[0] ?? " ";
-      const content = diff.text.slice(1);
-      const lineBg = selected
-        ? palette.selected
-        : diff.kind === "addition"
-          ? diffTints.additionBg
-          : diff.kind === "deletion"
-            ? diffTints.deletionBg
-            : palette.background;
-      const gutterBg = selected
-        ? palette.selected
-        : diff.kind === "addition"
-          ? diffTints.additionGutterBg
-          : diff.kind === "deletion"
-            ? diffTints.deletionGutterBg
-            : palette.background;
-      const signColor =
-        diff.kind === "addition"
-          ? palette.success
-          : diff.kind === "deletion"
-            ? palette.danger
-            : palette.dim;
-      const tail = padCells("", Math.max(0, width - diffGutterCells() - 1 - [...content].length));
-      return new StyledText([
-        ...t`${bg(gutterBg)(fg(markerColor)(markerText))}${bg(gutterBg)(fg(palette.dim)(gutter))}${bg(lineBg)(bold(fg(signColor)(sign)))}`
-          .chunks,
-        ...spanChunks(
-          (row.lineIndex !== undefined ? diffSpans[row.lineIndex] : undefined) ??
-            highlightCode(content, filetypeForPath(diff.path)),
-          diff.kind === "context",
-          lineBg,
-        ),
-        ...t`${bg(lineBg)(tail)}`.chunks,
-      ]);
-    }
-
     function refreshArtifactRow(index: number): void {
       const row = artifactRows[index];
       const renderable = rowRenderables[index];
       if (!row || !renderable) return;
-      if (view.artifact === "diff") renderable.width = diffRowWidth(row);
+      if (view.artifact === "diff") renderable.width = diffView.rowWidth(row);
       renderable.content = renderArtifactRow(
         row,
         rowMatchesQuery(row),
@@ -3263,18 +2465,6 @@ async function main(): Promise<void> {
 
     function proseRowWidth(): number {
       return Math.max(20, artifactScroll.width - 1);
-    }
-
-    function diffGutterCells(): number {
-      return diffGutterWidth * 2 + 3;
-    }
-
-    function diffRowWidth(row: ActivityRow): number {
-      const textWidth =
-        row.diff?.kind === "file"
-          ? (row.diff.path?.length ?? row.text.length) + 24
-          : row.text.length;
-      return Math.max(artifactScroll.width, diffGutterCells() + textWidth + 3);
     }
 
     function toggleSelectedTool(): void {
@@ -3406,18 +2596,7 @@ async function main(): Promise<void> {
         const selected = view.artifact === artifact;
         tab.content = renderTabLabel(artifact, selected);
       }
-      diffSidebar.visible = view.artifact === "diff" && renderer.width >= 100;
-      diffDivider.visible = diffSidebar.visible;
-      if (!diffDividerDragging) {
-        const container = artifactBody.width || Math.max(60, renderer.width - 46);
-        const next = diffTreeWidthForRatio(diffTreeRatio, container, diffTreeWidth);
-        if (next !== diffTreeWidth) {
-          diffTreeWidth = next;
-          updateDiffFileTree();
-        }
-      }
-      diffSidebar.width = diffTreeWidth;
-      updateDiffSummaryLine();
+      diffView.updateChrome();
       followIndicator.content = view.artifact === "diff" || artifactFollowing
         ? ""
         : `paused${unseenRows > 0 ? ` · ${unseenRows} new` : ""} · End resumes`;
@@ -3449,6 +2628,7 @@ async function main(): Promise<void> {
       const name = selected
         ? underline(bold(fg(color)(label)))
         : fg(color)(label);
+      const diffSummary = diffView.summary;
       if (artifact === "diff" && diffSummary && diffSummary.files > 0) {
         const additions = selected ? palette.success : palette.dim;
         const deletions = selected ? palette.danger : palette.dim;
@@ -3669,7 +2849,7 @@ async function main(): Promise<void> {
         clearInterval(refreshTimer);
         clearInterval(animationTimer);
         if (statusTimer) clearTimeout(statusTimer);
-        if (diffNavigationTimer) clearTimeout(diffNavigationTimer);
+        diffView.dispose();
         for (const signal of signalNames) process.off(signal, shutdown);
         await refreshGate.stop();
         if (!destroyed) {
@@ -3698,413 +2878,7 @@ async function main(): Promise<void> {
   }
 }
 
-function tokenColor(token: CodeToken, muted: boolean): string {
-  let base: string;
-  switch (token) {
-    case "keyword":
-      base = palette.accent;
-      break;
-    case "string":
-      base = palette.success;
-      break;
-    case "regex":
-      base = blendHex(palette.success, palette.warning, 0.4);
-      break;
-    case "number":
-    case "constant":
-      base = palette.warning;
-      break;
-    case "comment":
-      base = palette.dim;
-      break;
-    case "type":
-      base = blendHex(palette.text, palette.warning, 0.45);
-      break;
-    case "function":
-      base = blendHex(palette.text, palette.accent, 0.55);
-      break;
-    case "tag":
-      base = palette.danger;
-      break;
-    case "attribute":
-      base = blendHex(palette.warning, palette.text, 0.35);
-      break;
-    case "property":
-      base = blendHex(palette.text, palette.accent, 0.35);
-      break;
-    case "operator":
-      base = blendHex(palette.text, palette.danger, 0.3);
-      break;
-    case "punctuation":
-      base = blendHex(palette.text, palette.dim, 0.5);
-      break;
-    case "heading":
-      base = palette.accent;
-      break;
-    default:
-      base = palette.text;
-  }
-  return muted ? blendHex(base, palette.dim, 0.55) : base;
-}
 
-function spanChunks(
-  spans: readonly CodeSpan[],
-  muted: boolean,
-  rowBg?: string,
-): StyledText["chunks"] {
-  const chunks: StyledText["chunks"] = [];
-  for (const span of spans) {
-    let chunk = fg(tokenColor(span.token, muted))(span.text);
-    if (span.token === "comment") chunk = italic(chunk);
-    else if (span.token === "keyword" || span.token === "function" || span.token === "heading")
-      chunk = bold(chunk);
-    else if (span.token === "attribute") chunk = italic(chunk);
-    if (rowBg) chunk = bg(rowBg)(chunk);
-    chunks.push(...t`${chunk}`.chunks);
-  }
-  return chunks;
-}
-
-function codeChunks(
-  line: string,
-  filetype: string,
-  muted: boolean,
-  rowBg?: string,
-): StyledText["chunks"] {
-  return spanChunks(highlightCode(line, filetype), muted, rowBg);
-}
-
-// SelectRenderable only scrolls to follow its selection; wheel scrolling has
-// to move the viewport without touching the selected item, so read and write
-// its offset directly. The list re-centers on the next selection change.
-interface ScrollableList {
-  scrollOffset: number;
-}
-
-function listScrollOffset(list: SelectRenderable): number {
-  return (list as unknown as ScrollableList).scrollOffset ?? 0;
-}
-
-function scrollListBy(
-  list: SelectRenderable,
-  delta: number,
-  linesPerItem: number,
-): number {
-  const visible = Math.max(1, Math.floor(list.height / linesPerItem));
-  const next = clampScrollOffset(
-    listScrollOffset(list) + delta,
-    list.options.length,
-    visible,
-  );
-  (list as unknown as ScrollableList).scrollOffset = next;
-  list.requestRender();
-  return next;
-}
-
-function renderSessionDetails(
-  session: Session | undefined,
-  content: string,
-): string | StyledText {
-  if (!session) return content;
-  const chunks: StyledText["chunks"] = [];
-  const lines = content.split("\n");
-  for (const [index, line] of lines.entries()) {
-    const match = /^(\S+)(\s+)(.*)$/.exec(line);
-    if (!match) chunks.push(...t`${fg(palette.text)(line)}`.chunks);
-    else {
-      const [, label, spacing, value] = match;
-      const labelChunk = fg(palette.dim)(`${label}${spacing}`);
-      if (label === "status")
-        chunks.push(
-          ...t`${labelChunk}${bold(fg(sessionStatusColor(session.status))(value))}`
-            .chunks,
-        );
-      else if (label === "provider" || label === "model" || label === "cwd")
-        chunks.push(...t`${labelChunk}${fg(palette.accent)(value)}`.chunks);
-      else chunks.push(...t`${labelChunk}${fg(palette.text)(value)}`.chunks);
-    }
-    if (index < lines.length - 1) chunks.push(...t`\n`.chunks);
-  }
-  return new StyledText(chunks);
-}
-
-function sessionStatusColor(status: string): string {
-  if (status === "active" || status === "completed") return palette.success;
-  if (status === "starting") return palette.warning;
-  if (status === "failed" || status === "interrupted" || status === "stale")
-    return palette.danger;
-  return palette.text;
-}
-
-function renderChatEntry(entry: ChatEntry, revealed?: number): StyledText {
-  if (entry.kind === "user")
-    return t`${bold(fg(palette.accent)("❯ "))}${bold(fg(palette.text)(entry.text))}`;
-  if (entry.kind === "agent") {
-    const text =
-      revealed !== undefined && revealed < entry.text.length
-        ? entry.text.slice(0, revealed)
-        : entry.text;
-    const chunks = renderMarkdown(text);
-    if (revealed !== undefined && revealed < entry.text.length)
-      chunks.push(...t`${fg(palette.accent)("▍")}`.chunks);
-    return new StyledText(chunks);
-  }
-  if (entry.kind === "thought")
-    return t`${italic(fg(palette.dim)(entry.text))}`;
-  const status = entry.status ?? "running";
-  const glyph = status === "completed" ? "•" : status === "failed" ? "×" : "◐";
-  const color =
-    status === "completed"
-      ? palette.dim
-      : status === "failed"
-        ? palette.danger
-        : palette.warning;
-  return t`  ${fg(color)(glyph)} ${fg(palette.dim)(entry.text)}`;
-}
-
-function renderInline(spans: InlineSpan[], baseColor = palette.text): StyledText["chunks"] {
-  const chunks: StyledText["chunks"] = [];
-  for (const span of spans) {
-    const chunk =
-      span.style === "code"
-        ? bg(palette.panel)(fg(palette.accent)(` ${span.text} `))
-        : span.style === "bold"
-          ? bold(fg(baseColor)(span.text))
-          : span.style === "italic"
-            ? italic(fg(baseColor)(span.text))
-            : span.style === "link"
-              ? underline(fg(palette.accent)(span.text))
-              : fg(baseColor)(span.text);
-    chunks.push(...t`${chunk}`.chunks);
-  }
-  return chunks;
-}
-
-function renderMarkdownLine(line: MarkdownLine): StyledText["chunks"] {
-  switch (line.kind) {
-    case "heading": {
-      const color = (line.level ?? 1) <= 2 ? palette.accent : palette.text;
-      const prefix = (line.level ?? 1) <= 2 ? "" : `${"#".repeat(line.level ?? 3)} `;
-      return t`${bold(fg(color)(prefix))}${bold(fg(color)(line.spans.map((span) => span.text).join("")))}`.chunks;
-    }
-    case "bullet":
-      return [
-        ...t`${"  ".repeat(line.indent ?? 0)}${fg(palette.accent)("•")} `.chunks,
-        ...renderInline(line.spans),
-      ];
-    case "numbered":
-      return [
-        ...t`${"  ".repeat(line.indent ?? 0)}${fg(palette.accent)(line.marker ?? "1.")} `.chunks,
-        ...renderInline(line.spans),
-      ];
-    case "quote":
-      return [
-        ...t`${fg(palette.border)("▎ ")}`.chunks,
-        ...renderInline(line.spans, palette.dim),
-      ];
-    case "fence":
-      return t`${fg(palette.dim)(`  ${line.language ? `▎ ${line.language}` : "▎"}`)}`.chunks;
-    case "code": {
-      const text = line.spans.map((span) => span.text).join("");
-      return [
-        ...t`${bg(palette.panel)("  ")}`.chunks,
-        ...codeChunks(text, line.language ?? "plain", false, palette.panel),
-        ...t`${bg(palette.panel)(" ")}`.chunks,
-      ];
-    }
-    case "rule":
-      return t`${fg(palette.border)("─".repeat(24))}`.chunks;
-    case "blank":
-      return [];
-    default:
-      return renderInline(line.spans);
-  }
-}
-
-function renderMarkdown(text: string): StyledText["chunks"] {
-  const lines = parseMarkdown(text);
-  const chunks: StyledText["chunks"] = [];
-  let block: { start: number; language: string } | undefined;
-  let blockSpans: CodeSpan[][] = [];
-  for (const [index, line] of lines.entries()) {
-    if (index > 0) chunks.push(...t`\n`.chunks);
-    if (line.kind === "code") {
-      if (!block || block.language !== (line.language ?? "plain")) {
-        block = { start: index, language: line.language ?? "plain" };
-        const run: string[] = [];
-        for (let cursor = index; cursor < lines.length && lines[cursor].kind === "code"; cursor++)
-          run.push(lines[cursor].spans.map((span) => span.text).join(""));
-        blockSpans = highlightLines(run, block.language);
-      }
-      chunks.push(
-        ...t`${bg(palette.panel)("  ")}`.chunks,
-        ...spanChunks(blockSpans[index - block.start] ?? [], false, palette.panel),
-        ...t`${bg(palette.panel)(" ")}`.chunks,
-      );
-      continue;
-    }
-    block = undefined;
-    chunks.push(...renderMarkdownLine(line));
-  }
-  return chunks;
-}
-
-function renderTraceActivity(
-  activity: TraceActivity,
-  detail?: ToolEventDetail,
-  expanded = false,
-): StyledText {
-  if (activity.kind === "thought")
-    return t`${italic(fg(palette.dim)(activity.text))}`;
-  if (activity.kind === "tool") {
-    const state = detail?.status ?? activity.toolStatus ?? "running";
-    const glyph = state === "completed" ? "✓" : state === "failed" ? "×" : "◐";
-    const color =
-      state === "completed"
-        ? palette.success
-        : state === "failed"
-          ? palette.danger
-          : palette.warning;
-    const durationMs = detail?.durationMs ?? activity.durationMs;
-    const duration =
-      durationMs === undefined ? "" : `  ${formatDuration(durationMs)}`;
-    const subAgent = detail?.type === "subAgentActivity";
-    const label = subAgent ? "agent" : (activity.label ?? "tool");
-    const text = subAgent
-      ? `${detail.activityKind ?? "activity"} ${detail.agentPath ?? detail.agentThreadId ?? "sub-agent"}`
-      : activity.text;
-    const caret = expanded ? "▾" : "▸";
-    const exit =
-      detail?.exitCode !== undefined && detail.exitCode !== 0
-        ? `  exit ${detail.exitCode}`
-        : "";
-    return t`${fg(palette.dim)(caret)} ${fg(color)(glyph)} ${bold(fg(color)(label))}  ${fg(palette.text)(text)}${fg(palette.dim)(duration)}${fg(palette.danger)(exit)}`;
-  }
-  if (activity.kind === "message")
-    return t`${fg(palette.accent)("›")} ${fg(palette.text)(activity.text)}`;
-  if (activity.kind === "warning")
-    return t`${fg(palette.warning)("!")} ${fg(palette.warning)(activity.text)}`;
-  if (activity.kind === "error")
-    return t`${fg(palette.danger)("×")} ${fg(palette.danger)(activity.text)}`;
-  const label = activity.label ? `${activity.label} ` : "";
-  return t`${fg(palette.dim)(`• ${label}${activity.text}`)}`;
-}
-
-function renderToolDetail(
-  detail: ToolEventDetail | undefined,
-  activity: TraceActivity,
-): StyledText {
-  const rail = fg(palette.border)("  │ ");
-  const chunks: StyledText["chunks"] = [];
-  const line = (...parts: StyledText["chunks"][]) => {
-    chunks.push(...t`\n${rail}`.chunks);
-    for (const part of parts) chunks.push(...part);
-  };
-  const field = (label: string, value: string, color = palette.text) =>
-    line(t`${fg(palette.dim)(label.padEnd(8))}${fg(color)(value)}`.chunks);
-  if (!detail) {
-    line(t`${italic(fg(palette.dim)("No additional tool detail was captured."))}`.chunks);
-    return new StyledText(chunks);
-  }
-  const command = detail.command || detail.query || detail.toolName || activity.text;
-  const status = `${detail.status}${detail.exitCode === undefined ? "" : ` · exit ${detail.exitCode}`}${
-    detail.durationMs === undefined
-      ? ""
-      : ` · ${formatDuration(detail.durationMs)}`
-  }`;
-  field("command", command);
-  field("status", status, sessionStatusColor(detail.status));
-  if (detail.cwd) field("cwd", detail.cwd, palette.accent);
-  if (detail.agentThreadId) field("thread", detail.agentThreadId, palette.accent);
-  if (detail.input && Object.keys(detail.input).length > 0) {
-    line(t`${fg(palette.dim)("input")}`.chunks);
-    for (const inputLine of JSON.stringify(detail.input, null, 2).split("\n"))
-      line(codeChunks(inputLine, "json", false));
-  }
-  if (detail.output) {
-    const outputLines = detail.output.trimEnd().split("\n");
-    const clipped = outputLines.length > TOOL_OUTPUT_LINES;
-    line(
-      t`${fg(palette.dim)(clipped ? `output · last ${TOOL_OUTPUT_LINES} of ${outputLines.length} lines` : "output")}`
-        .chunks,
-    );
-    for (const outputLine of outputLines.slice(-TOOL_OUTPUT_LINES))
-      line(t`${fg(palette.text)(outputLine)}`.chunks);
-  }
-  chunks.push(...t`\n${fg(palette.border)("  ╰")}`.chunks);
-  return new StyledText(chunks);
-}
-
-function activitySearchText(
-  activity: TraceActivity,
-  detail?: ToolEventDetail,
-): string {
-  return [
-    activity.label,
-    activity.text,
-    activity.toolStatus,
-    detail?.command,
-    detail?.cwd,
-    detail?.status,
-    detail?.output,
-    detail?.query,
-    detail?.toolName,
-    detail?.agentThreadId,
-    detail?.agentPath,
-    detail?.activityKind,
-    detail?.input ? JSON.stringify(detail.input) : undefined,
-  ]
-    .filter(Boolean)
-    .join(" ");
-}
-
-function activityCopyText(
-  activity: TraceActivity,
-  detail?: ToolEventDetail,
-): string {
-  if (!detail) return activity.text;
-  return [
-    detail.command || detail.query || activity.text,
-    `status: ${detail.status}${detail.exitCode === undefined ? "" : ` (exit ${detail.exitCode})`}`,
-    detail.cwd ? `cwd: ${detail.cwd}` : "",
-    detail.agentThreadId ? `thread: ${detail.agentThreadId}` : "",
-    detail.output || "",
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-function isLive(session: Session): boolean {
-  return (
-    session.status === "active" ||
-    session.status === "idle" ||
-    session.status === "starting"
-  );
-}
-
-function formatDuration(milliseconds: number): string {
-  if (milliseconds < 1_000) return `${milliseconds}ms`;
-  return `${(milliseconds / 1_000).toFixed(milliseconds < 10_000 ? 1 : 0)}s`;
-}
-
-async function runControl(ruddr: string, args: string[]): Promise<string> {
-  const child = Bun.spawn([ruddr, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  if (exitCode !== 0)
-    throw new Error(stderr.trim() || `ruddr ${args[0]} exited ${exitCode}`);
-  return stdout.trim();
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 await main().catch((error) => {
   process.stderr.write(`ruddr tui: ${errorMessage(error)}\n`);
