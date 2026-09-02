@@ -41,6 +41,8 @@ import {
   visibleGitDiffLineIndices,
   clampScrollOffset,
   contextMeter,
+  DEFAULT_MOBILE_WIDTH_THRESHOLD,
+  layoutForWidth,
   deleteSessionArtifacts,
   sessionIsDeletable,
   diffTreeWidthForRatio,
@@ -748,6 +750,24 @@ describe("artifact and display helpers", () => {
     const decoyResult = await deleteSessionArtifacts({ stateDir: decoy, status: "failed" }, [registry]);
     expect(decoyResult.removedStateDir).toBe(false);
     expect(await readFile(join(decoy, "state.json"), "utf8")).toContain("other.run");
+  });
+
+  test("switches to the mobile layout at the width threshold", () => {
+    expect(layoutForWidth(120, DEFAULT_MOBILE_WIDTH_THRESHOLD, "classic")).toEqual({
+      layout: "classic",
+      mobile: false,
+    });
+    expect(layoutForWidth(64, DEFAULT_MOBILE_WIDTH_THRESHOLD, "classic")).toEqual({
+      layout: "beta",
+      mobile: true,
+    });
+    expect(layoutForWidth(65, 64, "beta")).toEqual({ layout: "beta", mobile: false });
+    expect(layoutForWidth(200, 64, "classic", true).mobile).toBe(true);
+    expect(layoutForWidth(40, 0, "classic").mobile).toBe(false);
+    expect(parseArguments(["--ruddr", "r", "--mobile"], {}).mobile).toBe(true);
+    expect(parseArguments(["--ruddr", "r"], { RUDDR_TUI_MOBILE: "1" }).mobile).toBe(true);
+    expect(parseArguments(["--ruddr", "r"], { RUDDER_TUI_MOBILE: "1" }).mobile).toBe(true);
+    expect(parseArguments(["--ruddr", "r"], {}).mobile).toBe(false);
   });
 
   test("clamps wheel scrolling of a list to its content", () => {

@@ -385,6 +385,8 @@ export interface TUIArguments {
   includeAll: boolean;
   theme?: string;
   beta: boolean;
+  /** Force the narrow single-column layout regardless of terminal width. */
+  mobile: boolean;
 }
 
 export interface ViewState {
@@ -423,6 +425,8 @@ export function parseArguments(
   let theme: string | undefined;
   let beta =
     (environment.RUDDR_TUI_BETA ?? environment.RUDDER_TUI_BETA) === "1";
+  let mobile =
+    (environment.RUDDR_TUI_MOBILE ?? environment.RUDDER_TUI_MOBILE) === "1";
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index];
     const value = argv[index + 1];
@@ -452,13 +456,14 @@ export function parseArguments(
       index++;
     } else if (argument === "--all") includeAll = true;
     else if (argument === "--beta") beta = true;
+    else if (argument === "--mobile") mobile = true;
     else throw new Error(`unknown TUI argument ${argument}`);
   }
   if (!ruddr)
     throw new Error("--ruddr is required (launch the TUI through ruddr tui)");
   if (roots.length === 0 && stateDirs.length === 0)
     roots.push(join(process.cwd(), ".scratch"));
-  return { ruddr, roots, stateDirs, interval, includeAll, theme, beta };
+  return { ruddr, roots, stateDirs, interval, includeAll, theme, beta, mobile };
 }
 
 function parseInterval(value: string): number {
@@ -471,6 +476,29 @@ function parseInterval(value: string): number {
   const milliseconds = match[2] === "s" ? amount * 1_000 : amount;
   if (milliseconds < 100) throw new Error("--interval must be at least 100ms");
   return milliseconds;
+}
+
+export const DEFAULT_MOBILE_WIDTH_THRESHOLD = 64;
+
+export interface ResolvedLayout {
+  layout: TUILayout;
+  /** Narrow single-column chrome with a tappable action bar. */
+  mobile: boolean;
+}
+
+/**
+ * Picks the layout for a terminal width. At or below the threshold (phones,
+ * split panes) the chat-first layout takes over with touch chrome; above it
+ * the launch layout returns.
+ */
+export function layoutForWidth(
+  width: number,
+  threshold: number,
+  launchLayout: TUILayout,
+  forceMobile = false,
+): ResolvedLayout {
+  if (forceMobile || width <= threshold) return { layout: "beta", mobile: true };
+  return { layout: launchLayout, mobile: false };
 }
 
 export type DashboardNavigation =

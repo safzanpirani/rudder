@@ -43,6 +43,8 @@ import {
   continuationRunArguments,
   contextualHelp,
   dashboardNavigation,
+  DEFAULT_MOBILE_WIDTH_THRESHOLD,
+  layoutForWidth,
   discoverSessions,
   emptyPromptHint,
   filterSessions,
@@ -132,7 +134,9 @@ type SearchMode = "sessions" | "artifact" | "deja";
 
 async function main(): Promise<void> {
   const args = parseArguments(Bun.argv.slice(2));
-  const layout: TUILayout = args.beta ? "beta" : "classic";
+  const launchLayout: TUILayout = args.beta ? "beta" : "classic";
+  let layout: TUILayout = launchLayout;
+  let mobile = false;
   const persistedConfig = await readTUIConfig();
   let activeThemeName = resolveThemeName(
     args.theme || process.env.RUDDR_TUI_THEME || process.env.RUDDER_TUI_THEME,
@@ -271,15 +275,13 @@ async function main(): Promise<void> {
       },
     });
     const sessionsPanel = new BoxRenderable(renderer, {
-      position: layout === "beta" ? "absolute" : "relative",
-      left: layout === "beta" ? "8%" : undefined,
-      top: layout === "beta" ? "8%" : undefined,
-      width: layout === "beta" ? "84%" : "34%",
-      minWidth: layout === "classic" ? 36 : undefined,
-      maxWidth: layout === "classic" ? 44 : undefined,
-      height: layout === "beta" ? "84%" : "100%",
+      position: "relative",
+      width: "34%",
+      minWidth: 36,
+      maxWidth: 44,
+      height: "100%",
       flexShrink: 0,
-      zIndex: layout === "beta" ? 15 : 0,
+      zIndex: 0,
       border: true,
       borderStyle: "rounded",
       borderColor: palette.border,
@@ -291,7 +293,7 @@ async function main(): Promise<void> {
       }),
       padding: 1,
       backgroundColor: palette.background,
-      visible: layout === "classic",
+      visible: true,
     });
     sessionsPanel.add(sessionList);
 
@@ -309,7 +311,7 @@ async function main(): Promise<void> {
       title: " Session · i hide ",
       padding: 1,
       backgroundColor: palette.background,
-      visible: layout === "classic",
+      visible: true,
     });
     detailsPanel.add(details);
 
@@ -445,8 +447,7 @@ async function main(): Promise<void> {
     artifactPanel.add(artifactBody);
 
     const rightColumn = new BoxRenderable(renderer, {
-      width: layout === "beta" ? "100%" : undefined,
-      minWidth: layout === "classic" ? 50 : undefined,
+      minWidth: 50,
       height: "100%",
       flexGrow: 1,
       flexDirection: "column",
@@ -459,11 +460,12 @@ async function main(): Promise<void> {
     const body = new BoxRenderable(renderer, {
       width: "100%",
       flexGrow: 1,
-      flexDirection: layout === "beta" ? "column" : "row",
+      flexDirection: "row",
       gap: 1,
     });
-    if (layout === "classic") body.add(sessionsPanel);
+    body.add(sessionsPanel);
     body.add(rightColumn);
+    let sessionsParent: BoxRenderable = body;
 
     // Meta line under the input: mode + model on the left, tokens/cost right.
     const promptMetaLeft = new TextRenderable(renderer, {
@@ -531,6 +533,38 @@ async function main(): Promise<void> {
     });
     footerBar.add(footerLeft);
     footerBar.add(footerRight);
+
+    // Mobile action bar: the keys a phone cannot press, as tappable buttons.
+    const actionButtons: Array<[TextRenderable, () => void]> = [];
+    const actionBar = new BoxRenderable(renderer, {
+      width: "100%",
+      height: 1,
+      flexDirection: "row",
+      justifyContent: "space-around",
+      gap: 1,
+      visible: false,
+    });
+    const makeAction = (label: string, run: () => void) => {
+      const button = new TextRenderable(renderer, {
+        content: label,
+        fg: palette.accent,
+        wrapMode: "none",
+      });
+      button.onMouseDown = (event) => {
+        event.preventDefault();
+        run();
+      };
+      actionButtons.push([button, run]);
+      actionBar.add(button);
+      return button;
+    };
+    const actionSessions = makeAction(" ≡ sessions ", () => showSessions());
+    const actionPrompt = makeAction(" ✎ prompt ", () => {
+      if (promptTargetForSession(selectedSession())) openPrompt("auto");
+      else startNewSessionFlow();
+    });
+    const actionStop = makeAction(" ■ stop ", () => void requestInterrupt());
+    const actionMore = makeAction(" ⋯ more ", () => openPalette());
 
     const searchInput = new InputRenderable(renderer, {
       id: "search-input",
@@ -778,7 +812,7 @@ async function main(): Promise<void> {
     root.add(promptMeta);
     root.add(statusLine);
     root.add(footerBar);
-    if (layout === "beta") root.add(sessionsPanel);
+    root.add(actionBar);
     root.add(searchPanel);
     root.add(palettePanel);
     root.add(contextMenu.panel);
@@ -960,6 +994,7 @@ async function main(): Promise<void> {
       setTimeout(updateFollowFromPosition, 0);
     };
     renderer.on("resize", () => {
+      syncLayoutToWidth();
       updateChrome();
       if (view.artifact !== "diff") applySessionFilter();
       renderArtifactRows(true);
@@ -1303,6 +1338,10 @@ async function main(): Promise<void> {
       promptMetaRight.fg = palette.dim;
       followIndicator.fg = palette.warning;
       chatTab.fg = palette.accent;
+      for (const [button] of actionButtons) {
+        button.fg = palette.accent;
+        button.bg = palette.panel;
+      }
       sessionsPanel.backgroundColor = palette.background;
       promptPanel.backgroundColor = palette.background;
       promptPanel.focusedBorderColor = palette.accent;
@@ -1453,6 +1492,68 @@ async function main(): Promise<void> {
         case "copy": copyCurrentSelection(); break;
         case "quit": void shutdown(); break;
       }
+    }
+
+    function mobileThreshold(): number {
+      return persistedConfig.mobileWidthThreshold ?? DEFAULT_MOBILE_WIDTH_THRESHOLD;
+    }
+
+    /** Re-evaluates the layout for the current width; no-op when unchanged. */
+    function syncLayoutToWidth(): boolean {
+      const next = layoutForWidth(renderer.width, mobileThreshold(), launchLayout, args.mobile);
+      if (next.layout === layout && next.mobile === mobile) return false;
+      applyLayout(next.layout, next.mobile);
+      return true;
+    }
+
+    // Switches between the docked dashboard and the chat-first overlay layout
+    // in place: the sessions pane changes parent and positioning, and the
+    // mobile flag swaps the key-hint footer for the tappable action bar.
+    function applyLayout(nextLayout: TUILayout, nextMobile: boolean): void {
+      layout = nextLayout;
+      mobile = nextMobile;
+      const overlay = layout === "beta";
+      const wantedParent = overlay ? root : body;
+      if (sessionsParent !== wantedParent) {
+        sessionsParent.remove(sessionsPanel);
+        if (overlay) root.add(sessionsPanel);
+        else {
+          // Docked pane belongs before the right column.
+          body.remove(rightColumn);
+          body.add(sessionsPanel);
+          body.add(rightColumn);
+        }
+        sessionsParent = wantedParent;
+      }
+      sessionsPanel.position = overlay ? "absolute" : "relative";
+      sessionsPanel.left = overlay ? (mobile ? "2%" : "8%") : "auto";
+      sessionsPanel.top = overlay ? (mobile ? "4%" : "8%") : "auto";
+      sessionsPanel.width = overlay ? (mobile ? "96%" : "84%") : "34%";
+      sessionsPanel.minWidth = overlay ? undefined : 36;
+      sessionsPanel.maxWidth = overlay ? undefined : 44;
+      sessionsPanel.height = overlay ? (mobile ? "92%" : "84%") : "100%";
+      sessionsPanel.zIndex = overlay ? 15 : 0;
+      sessionsVisible = false;
+      sessionsPanel.visible = !overlay;
+      detailsPanel.visible = !overlay;
+      detailsExpanded = false;
+      rightColumn.width = overlay ? "100%" : "auto";
+      rightColumn.minWidth = overlay ? undefined : 50;
+      body.flexDirection = overlay ? "column" : "row";
+      root.padding = mobile ? 0 : 1;
+      artifactPanel.paddingLeft = mobile ? 0 : 1;
+      artifactPanel.paddingRight = mobile ? 0 : 1;
+      footerBar.visible = !mobile;
+      actionBar.visible = mobile;
+      // Narrow screens keep only the meter and status under the prompt.
+      promptMetaLeft.visible = !mobile;
+      if (view.focus === "sessions") {
+        view = { ...view, focus: "artifact" };
+        artifactScroll.focus();
+      }
+      updateDetails();
+      renderArtifactRows(true);
+      updateChrome();
     }
 
     function focusCurrentPanel(): void {
@@ -2619,6 +2720,20 @@ async function main(): Promise<void> {
       updateWorkingIndicator();
       renderStatus();
       updatePromptChrome();
+      updateActionBar();
+    }
+
+    function updateActionBar(): void {
+      if (!mobile) return;
+      const session = selectedSession();
+      const stoppable = session?.status === "active" || session?.status === "idle";
+      const promptable = Boolean(promptTargetForSession(session));
+      actionSessions.content = ` ≡ ${sessions.length} `;
+      actionPrompt.content = promptable ? " ✎ prompt " : " ✎ new ";
+      actionStop.content = " ■ stop ";
+      actionStop.fg = stoppable ? palette.danger : palette.dim;
+      actionMore.content = " ⋯ more ";
+      for (const [button] of actionButtons) button.bg = palette.panel;
     }
 
     function renderTabLabel(artifact: Artifact, selected: boolean): StyledText {
@@ -2795,7 +2910,9 @@ async function main(): Promise<void> {
       const elapsed = formatElapsed(session!.startedAt, undefined);
       workingIndicator.fg =
         session!.status === "starting" ? palette.warning : palette.success;
-      workingIndicator.content = `${spinnerFrame(animationTick)} ${verb} · ${elapsed}`;
+      workingIndicator.content = mobile
+        ? `${spinnerFrame(animationTick)} ${elapsed}`
+        : `${spinnerFrame(animationTick)} ${verb} · ${elapsed}`;
     }
 
     // One cheap ticker drives every animation; each pass only touches the
@@ -2862,6 +2979,10 @@ async function main(): Promise<void> {
     }
 
     applyTheme(activeThemeName);
+    applyLayout(
+      layoutForWidth(renderer.width, mobileThreshold(), launchLayout, args.mobile).layout,
+      layoutForWidth(renderer.width, mobileThreshold(), launchLayout, args.mobile).mobile,
+    );
     void (async () => {
       try {
         models = parseModelCatalog(

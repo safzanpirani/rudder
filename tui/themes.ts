@@ -28,6 +28,8 @@ export interface TUIConfig {
   diffTreeWidth?: number;
   /** Sidebar width as a fraction of the artifact body; wins over diffTreeWidth. */
   diffTreeRatio?: number;
+  /** Terminal width at or below which the mobile layout is used. */
+  mobileWidthThreshold?: number;
 }
 
 export const defaultThemeName = "ruddr";
@@ -132,6 +134,7 @@ export async function readTUIConfig(
     const theme = Reflect.get(parsed, "theme");
     const diffTreeWidth = Reflect.get(parsed, "diffTreeWidth");
     const diffTreeRatio = Reflect.get(parsed, "diffTreeRatio");
+    const mobileWidthThreshold = Reflect.get(parsed, "mobileWidthThreshold");
     return {
       ...(typeof theme === "string" ? { theme } : {}),
       ...(typeof diffTreeWidth === "number" && Number.isFinite(diffTreeWidth)
@@ -142,6 +145,12 @@ export async function readTUIConfig(
       diffTreeRatio > 0 &&
       diffTreeRatio < 1
         ? { diffTreeRatio }
+        : {}),
+      ...(typeof mobileWidthThreshold === "number" &&
+      Number.isInteger(mobileWidthThreshold) &&
+      mobileWidthThreshold >= 0 &&
+      mobileWidthThreshold <= 500
+        ? { mobileWidthThreshold }
         : {}),
     };
   } catch (error) {

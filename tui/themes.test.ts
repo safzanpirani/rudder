@@ -61,6 +61,17 @@ describe("TUI themes", () => {
     expect(await readPersistedTheme(invalidFile)).toBeUndefined();
   });
 
+  test("reads a sane mobile width threshold and ignores junk", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ruddr-mobile-"));
+    const file = join(root, "tui.json");
+    await writeFile(file, JSON.stringify({ mobileWidthThreshold: 80 }));
+    expect(await readTUIConfig(file)).toEqual({ mobileWidthThreshold: 80 });
+    await writeFile(file, JSON.stringify({ mobileWidthThreshold: -5 }));
+    expect(await readTUIConfig(file)).toEqual({});
+    await writeFile(file, JSON.stringify({ mobileWidthThreshold: "wide" }));
+    expect(await readTUIConfig(file)).toEqual({});
+  });
+
   test("falls back to config written under the previous names", async () => {
     const root = await mkdtemp(join(tmpdir(), "ruddr-config-"));
     const current = join(root, "ruddr", "tui.json");

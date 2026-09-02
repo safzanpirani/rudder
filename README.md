@@ -343,7 +343,15 @@ focus between the sessions pane and the selected artifact. Press `Esc` in the
 sessions pane to return focus to the artifact.
 
 Use `--beta` for the chat-first layout. `RUDDR_TUI_BETA=1` enables the same
-layout. Beta mode shows one session's borderless conversation and keeps the
+layout.
+
+On narrow terminals the TUI switches to a mobile layout on its own: a single
+column with the sessions list as an overlay, no details panel, and a tappable
+action bar (`≡ sessions`, `✎ prompt`, `■ stop`, `⋯ more`) in place of the key
+hints, so a phone SSH client such as Blink or Termius can drive every action
+by touch. The switch happens at or below 64 columns and reverses when the
+window grows; set `mobileWidthThreshold` in `tui.json` to change the width, or
+pass `--mobile` (or `RUDDR_TUI_MOBILE=1`) to force it at any size. Beta mode shows one session's borderless conversation and keeps the
 sessions list behind a `Tab` overlay. `Enter` or `Esc` closes that overlay.
 
 Typing in the prompt input routes by session status. An active turn gets a

@@ -58,7 +58,7 @@ func printTUIUsage() {
 	fmt.Fprintf(os.Stderr, `Ruddr live sessions TUI
 
 Usage:
-  %s tui [--root DIR]... [--state-dir DIR]... [--all] [--interval 500ms] [--theme NAME] [--beta]
+  %s tui [--root DIR]... [--state-dir DIR]... [--all] [--interval 500ms] [--theme NAME] [--beta] [--mobile]
 
 Shows live runs first, then every finished run from the global registry plus
 .scratch below the current directory. --root and --state-dir may be repeated;
@@ -67,7 +67,10 @@ The refresh interval accepts milliseconds or seconds and must be at least 100ms.
 Press t inside the TUI to preview and save a theme. --theme overrides the saved
 theme for one launch; RUDDR_TUI_THEME provides the same environment override.
 --beta enables the chat-first layout; RUDDR_TUI_BETA=1 provides the same
-override. The default layout keeps the sessions dashboard visible.
+override. The default layout keeps the sessions dashboard visible. Terminals
+64 columns wide or narrower get the single-column mobile layout with a tappable
+action bar; --mobile or RUDDR_TUI_MOBILE=1 forces it, and mobileWidthThreshold
+in tui.json changes the width.
 `, name)
 }
 
