@@ -18,19 +18,30 @@ not installed).
 
 ## Pick a provider and model
 
-- `--provider codex` (the default) runs a Codex app-server session. Use it when
-  the user says "codex", or when work should run on the Codex quota instead of
-  the parent agent's.
+- `--provider codex` (the default) runs a Codex app-server session. Use it
+  when the user says "codex", or when work should run on the Codex quota
+  instead of the parent agent's. Default to `--model gpt-5.6-sol
+  --effort medium`.
 - `--provider claude` runs Claude Code through Ruddr's adapter. Use it when
-  the user says "claude", or for a clean-context second Claude.
+  the user says "claude", or for a clean-context second Claude. Default to
+  `--model claude-opus-5 --effort medium`.
+- `--provider opencode` runs OpenCode 2 and `--provider pi` runs Pi, both on
+  the models their own config exposes (the default is
+  `openrouter/deepseek/deepseek-v4-flash-vision-exp`). Use them when the user
+  names that tool, or for cheap parallel attempts. Only Pi accepts `--effort`.
+  Neither adapter enforces Ruddr's filesystem containment for
+  `workspace-write`; they rely on the provider's own permission system, so
+  prefer codex or claude for anything touching files outside the workspace.
 
-List valid models and reasoning efforts with `ruddr models --json` and pass an
-explicit `--model` (add `--effort high` for genuinely subtle problems). Honor
-an explicit user choice; otherwise the provider's default is fine.
+`ruddr models --json` lists every valid model and effort per provider. Honor
+an explicit user choice; raise the effort to `high` only for genuinely subtle
+problems. Pass `--model` explicitly so the run is reproducible from
+`state.json`.
 
 Claude only: if the bare `claude` binary cannot reach its credentials from a
 detached process, pass the wrapper that works interactively via
-`--claude-path` or `RUDDR_CLAUDE_PATH`. Never put tokens in argv or prompts.
+`--claude-path` or `RUDDR_CLAUDE_PATH`. OpenCode and Pi take `--opencode-path`
+and `--pi-path` the same way. Never put tokens in argv or prompts.
 
 ## Build the brief
 
@@ -46,6 +57,17 @@ stand alone:
    that the sub-agent cannot infer from the diff.
 6. Scope fences: what to touch, what is explicitly off-limits, and any
    unrelated dirty changes to preserve.
+7. Commit policy: by default tell it to leave every change uncommitted and
+   unpushed so the parent can review against the baseline. Only say otherwise
+   when the user asked for commits.
+8. The sandbox it runs in and what that means. `workspace-write` under Codex
+   has no network, so dependency fetches (`npm install`, `go mod download`,
+   `pip install`) fail; pre-install them from the parent before launching and
+   say so, or state that the fetch is unavailable so the sub-agent does not
+   misread the failure as a bug.
+9. The paths to ignore: the brief and the run state dir (see Launch). Tell it
+   those are the controller's files, must not be edited, and must not be
+   committed.
 
 Tell it to investigate before editing, implement directly, run the verify
 commands and iterate until they pass, and mark genuinely uncertain behavioral
@@ -74,14 +96,23 @@ At the very end, print a **"Handoff report"**:
 > example under `.scratch/<task-slug>/`) and reuse them verbatim. Never reuse
 > a previous run's state dir.
 
+> **Keep controller files out of the sub-agent's diff.** The brief and state
+> dir sit inside the worktree, so they show up in the sub-agent's `git
+> status`. Make sure `.scratch/` is ignored (`git check-ignore .scratch` or
+> add it to `.git/info/exclude`), or put the state dir outside the repo, and
+> name the paths in the brief as off-limits.
+
 ```bash
 ruddr run \
-  --provider codex \
+  --provider codex --model gpt-5.6-sol --effort medium \
   --cwd "$PWD" \
   --prompt-file .scratch/<task-slug>/brief.md \
   --state-dir .scratch/<task-slug>/run \
   --sandbox workspace-write
 ```
+
+Swap the first line for `--provider claude --model claude-opus-5 --effort
+medium`, `--provider opencode`, or `--provider pi` as chosen above.
 
 - Launch with the harness's background facility — a foreground tool call gets
   killed at the tool timeout, taking the controller with it. If the harness
@@ -125,11 +156,16 @@ with a brief that says what it already learned.
 ## Wait and verify
 
 ```bash
-ruddr wait --state-dir .scratch/<task-slug>/run --timeout 1h
+ruddr wait --state-dir .scratch/<task-slug>/run --timeout 10m
 ruddr status --state-dir .scratch/<task-slug>/run --json
 ```
 
-Always bound the wait. Trust `output.md` only when status is `completed`; on
+Always bound the wait, and never let it outlive the harness's tool timeout: a
+foreground `wait --timeout 1h` is killed by a two-minute tool limit, which
+looks like a failed hand-off while the run is still going. Either run the
+wait through the harness's background facility, or wait in slices of a few
+minutes with a `status --json` read between them. Keep doing the parent's own
+work between slices. Trust `output.md` only when status is `completed`; on
 `failed`/`interrupted`/`stale` report the error field instead — partial output
 is not a successful handoff. Then verify independently: run the verify
 command(s) yourself and cross-check claimed edits against the pre-run
