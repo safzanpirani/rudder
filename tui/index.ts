@@ -290,7 +290,7 @@ async function main(): Promise<void> {
   const layout: TUILayout = args.beta ? "beta" : "classic";
   const persistedConfig = await readTUIConfig();
   let activeThemeName = resolveThemeName(
-    args.theme || process.env.RUDDER_TUI_THEME,
+    args.theme || process.env.RUDDR_TUI_THEME || process.env.RUDDER_TUI_THEME,
     persistedConfig.theme,
   );
   palette = findTheme(activeThemeName)!.palette;
@@ -1057,7 +1057,7 @@ async function main(): Promise<void> {
       options: themes.map((theme) => ({
         name: theme.label,
         description:
-          theme.source === "OpenCode" ? "OpenCode · dark" : "Rudder default",
+          theme.source === "OpenCode" ? "OpenCode · dark" : "Ruddr default",
         value: theme.name,
       })),
       showDescription: true,
@@ -2419,12 +2419,12 @@ async function main(): Promise<void> {
       setStatus("Sending prompt…");
       let scratchDirectory = "";
       try {
-        scratchDirectory = await mkdtemp(join(tmpdir(), "rudder-tui-prompt-"));
+        scratchDirectory = await mkdtemp(join(tmpdir(), "ruddr-tui-prompt-"));
         await chmod(scratchDirectory, 0o700);
         const messageFile = join(scratchDirectory, "message.md");
         await writeFile(messageFile, `${message}\n`, { mode: 0o600 });
         const result = await runControl(
-          args.rudder,
+          args.ruddr,
           idlePromptControlArguments(session.stateDir, messageFile),
         );
         setStatus(result || "Prompt accepted", "success");
@@ -2448,7 +2448,7 @@ async function main(): Promise<void> {
         const provider = resume?.provider ?? model?.provider ?? "codex";
         // TODO(review): Deja hits do not expose their original cwd, so resumes currently use the TUI launch directory.
         const cwd = process.cwd();
-        const baseDirectory = join(cwd, ".scratch", "rudder-tui");
+        const baseDirectory = join(cwd, ".scratch", "ruddr-tui");
         await mkdir(baseDirectory, { recursive: true, mode: 0o700 });
         await chmod(baseDirectory, 0o700);
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -2464,7 +2464,7 @@ async function main(): Promise<void> {
           stateDirectory,
           ...(resume ? { resumeThreadId: resume.sessionId } : {}),
         });
-        const child = Bun.spawn([args.rudder, ...runArgs], {
+        const child = Bun.spawn([args.ruddr, ...runArgs], {
           cwd,
           stdout: "ignore",
           stderr: "ignore",
@@ -2500,12 +2500,12 @@ async function main(): Promise<void> {
       setStatus(`Steering ${sessionLabel(session)}…`);
       let scratchDirectory = "";
       try {
-        scratchDirectory = await mkdtemp(join(tmpdir(), "rudder-tui-steer-"));
+        scratchDirectory = await mkdtemp(join(tmpdir(), "ruddr-tui-steer-"));
         await chmod(scratchDirectory, 0o700);
         const messageFile = join(scratchDirectory, "message.md");
         await writeFile(messageFile, `${message}\n`, { mode: 0o600 });
         const result = await runControl(
-          args.rudder,
+          args.ruddr,
           steerControlArguments(session.stateDir, session.turnId!, messageFile),
         );
         setStatus(result || "Steer accepted", "success");
@@ -2528,7 +2528,7 @@ async function main(): Promise<void> {
       actionRunning = true;
       closePrompt();
       try {
-        const baseDirectory = join(session.cwd, ".scratch", "rudder-tui");
+        const baseDirectory = join(session.cwd, ".scratch", "ruddr-tui");
         await mkdir(baseDirectory, { recursive: true, mode: 0o700 });
         await chmod(baseDirectory, 0o700);
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -2547,7 +2547,7 @@ async function main(): Promise<void> {
           stateDirectory,
           overrides,
         );
-        const child = Bun.spawn([args.rudder, ...runArgs], {
+        const child = Bun.spawn([args.ruddr, ...runArgs], {
           cwd: session.cwd,
           stdout: "ignore",
           stderr: "ignore",
@@ -2588,7 +2588,7 @@ async function main(): Promise<void> {
       actionRunning = true;
       setStatus(idle ? "Ending idle session…" : "Interrupting selected turn…", "warning");
       try {
-        const result = await runControl(args.rudder, [
+        const result = await runControl(args.ruddr, [
           idle ? "stop" : "interrupt",
           "--state-dir",
           session.stateDir,
@@ -3475,7 +3475,7 @@ async function main(): Promise<void> {
       return t`${fg(palette.dim)(location.slice(0, separator))}${fg(palette.border)(":")}${fg(palette.accent)(location.slice(separator + 1))}`;
     }
 
-    // "~/dev/rudder:main" for the footer's left corner, opencode style.
+    // "~/dev/ruddr:main" for the footer's left corner, opencode style.
     const branchByCwd = new Map<string, string>();
     function sessionLocationSummary(session: Session | undefined): string {
       const cwd = session?.cwd ?? process.cwd();
@@ -3685,7 +3685,7 @@ async function main(): Promise<void> {
     void (async () => {
       try {
         models = parseModelCatalog(
-          await runControl(args.rudder, ["models", "--json"]),
+          await runControl(args.ruddr, ["models", "--json"]),
         );
       } catch {
         models = FALLBACK_MODELS;
@@ -4087,8 +4087,8 @@ function formatDuration(milliseconds: number): string {
   return `${(milliseconds / 1_000).toFixed(milliseconds < 10_000 ? 1 : 0)}s`;
 }
 
-async function runControl(rudder: string, args: string[]): Promise<string> {
-  const child = Bun.spawn([rudder, ...args], {
+async function runControl(ruddr: string, args: string[]): Promise<string> {
+  const child = Bun.spawn([ruddr, ...args], {
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -4098,7 +4098,7 @@ async function runControl(rudder: string, args: string[]): Promise<string> {
     child.exited,
   ]);
   if (exitCode !== 0)
-    throw new Error(stderr.trim() || `rudder ${args[0]} exited ${exitCode}`);
+    throw new Error(stderr.trim() || `ruddr ${args[0]} exited ${exitCode}`);
   return stdout.trim();
 }
 
@@ -4107,6 +4107,6 @@ function errorMessage(error: unknown): string {
 }
 
 await main().catch((error) => {
-  process.stderr.write(`rudder tui: ${errorMessage(error)}\n`);
+  process.stderr.write(`ruddr tui: ${errorMessage(error)}\n`);
   process.exitCode = 1;
 });

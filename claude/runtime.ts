@@ -120,7 +120,7 @@ export class AsyncMessageQueue implements AsyncIterable<SDKUserMessage> {
   }
 }
 
-export class ClaudeRudderAdapter {
+export class ClaudeRuddrAdapter {
   private initialized = false;
   private thread?: ThreadConfig;
   private turn?: TurnState;
@@ -184,7 +184,7 @@ export class ClaudeRudderAdapter {
       case "initialize":
         this.initialized = true;
         return {
-          serverInfo: { name: "rudder-claude-adapter", version: "1" },
+          serverInfo: { name: "ruddr-claude-adapter", version: "1" },
           capabilities: { experimentalApi: true },
         };
       case "initialized":
@@ -596,26 +596,26 @@ export function buildQueryOptions(thread: ThreadConfig): Options {
             if (toolName === "AskUserQuestion") {
               return {
                 behavior: "deny" as const,
-                message: "Rudder cannot answer interactive questions; proceed with best judgment.",
+                message: "Ruddr cannot answer interactive questions; proceed with best judgment.",
               };
             }
             if (toolName === "Bash") {
               if (input.dangerouslyDisableSandbox === true) {
                 return {
                   behavior: "deny" as const,
-                  message: "Rudder denied a request to run Bash outside the workspace sandbox.",
+                  message: "Ruddr denied a request to run Bash outside the workspace sandbox.",
                 };
               }
               if (options.blockedPath) {
                 return {
                   behavior: "deny" as const,
-                  message: "Rudder denied Bash access outside the workspace sandbox.",
+                  message: "Ruddr denied Bash access outside the workspace sandbox.",
                 };
               }
               if (options.matchedAskRule) {
                 return {
                   behavior: "deny" as const,
-                  message: "Rudder cannot override an explicit interactive approval rule.",
+                  message: "Ruddr cannot override an explicit interactive approval rule.",
                 };
               }
 
@@ -625,7 +625,7 @@ export function buildQueryOptions(thread: ThreadConfig): Options {
             }
             return {
               behavior: "deny" as const,
-              message: "Rudder has no interactive approval surface for this operation.",
+              message: "Ruddr has no interactive approval surface for this operation.",
             };
           },
         }),

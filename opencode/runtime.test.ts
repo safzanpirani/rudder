@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import {
   HTTPBackend,
-  OpenCodeRudderAdapter,
-  rudderConfigContent,
+  OpenCodeRuddrAdapter,
+  ruddrConfigContent,
   validatedLoopbackURL,
   type OpenCodeBackend,
   type OpenCodeSnapshot,
@@ -50,7 +50,7 @@ class FakeBackend implements OpenCodeBackend {
 test("OpenCode adapter preserves same-turn steering and normalizes final output", async () => {
   const emitted: ProtocolMessage[] = [];
   const backend = new FakeBackend();
-  const adapter = new OpenCodeRudderAdapter((message) => {
+  const adapter = new OpenCodeRuddrAdapter((message) => {
     emitted.push(message);
   }, backend);
   await adapter.handle({ id: 1, method: "initialize", params: {} });
@@ -109,7 +109,7 @@ test("OpenCode waits for an accepted steer and the following idle snapshot", asy
   backend.steerGate = new Promise<void>((resolve) => {
     releaseSteer = resolve;
   });
-  const adapter = new OpenCodeRudderAdapter((message) => {
+  const adapter = new OpenCodeRuddrAdapter((message) => {
     emitted.push(message);
   }, backend);
   await adapter.handle({ id: 1, method: "initialize", params: {} });
@@ -164,13 +164,13 @@ test("OpenCode HTTP requests time out and server announcements stay on loopback"
   await backend.close();
 });
 
-test("OpenCode adapter installs distinct Rudder agents without discarding inline config", () => {
-  const config = JSON.parse(rudderConfigContent("read-only", JSON.stringify({ theme: "rudder", agents: { existing: { mode: "primary" } } })));
-  expect(config.theme).toBe("rudder");
+test("OpenCode adapter installs distinct Ruddr agents without discarding inline config", () => {
+  const config = JSON.parse(ruddrConfigContent("read-only", JSON.stringify({ theme: "ruddr", agents: { existing: { mode: "primary" } } })));
+  expect(config.theme).toBe("ruddr");
   expect(config.agents.existing.mode).toBe("primary");
-  expect(config.agents["rudder-read-only"].permissions).toContainEqual({ action: "*", resource: "*", effect: "deny" });
-  expect(config.agents["rudder-workspace-write"].permissions).toContainEqual({ action: "external_directory", resource: "*", effect: "deny" });
-  expect(config.agents["rudder-danger-full-access"].permissions).toEqual([{ action: "*", resource: "*", effect: "allow" }]);
+  expect(config.agents["ruddr-read-only"].permissions).toContainEqual({ action: "*", resource: "*", effect: "deny" });
+  expect(config.agents["ruddr-workspace-write"].permissions).toContainEqual({ action: "external_directory", resource: "*", effect: "deny" });
+  expect(config.agents["ruddr-danger-full-access"].permissions).toEqual([{ action: "*", resource: "*", effect: "allow" }]);
 });
 
 function result(messages: ProtocolMessage[], id: string | number): Record<string, any> {

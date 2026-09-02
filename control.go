@@ -319,7 +319,7 @@ func sendControl(stateDir string, request controlRequest, timeout time.Duration)
 	}
 	conn, err := net.DialTimeout("unix", state.SocketPath, timeout)
 	if err != nil {
-		return controlResponse{}, fmt.Errorf("connect to Rudder pid %d at %s: %w", state.PID, state.SocketPath, err)
+		return controlResponse{}, fmt.Errorf("connect to Ruddr pid %d at %s: %w", state.PID, state.SocketPath, err)
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(timeout))
@@ -335,14 +335,14 @@ func sendControl(stateDir string, request controlRequest, timeout time.Duration)
 
 func ensureControllerLive(state runState) error {
 	if !processAlive(state.PID) {
-		return fmt.Errorf("Rudder pid %d is not running; state is stale at status=%s", state.PID, state.Status)
+		return fmt.Errorf("Ruddr pid %d is not running; state is stale at status=%s", state.PID, state.Status)
 	}
 	info, err := os.Lstat(state.SocketPath)
 	if err != nil {
-		return fmt.Errorf("Rudder pid %d has no control socket at %s: %w", state.PID, state.SocketPath, err)
+		return fmt.Errorf("Ruddr pid %d has no control socket at %s: %w", state.PID, state.SocketPath, err)
 	}
 	if info.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("Rudder control path is not a socket: %s", state.SocketPath)
+		return fmt.Errorf("Ruddr control path is not a socket: %s", state.SocketPath)
 	}
 	return nil
 }

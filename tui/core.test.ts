@@ -130,13 +130,13 @@ describe("view reducer", () => {
 
 describe("TUI layout helpers", () => {
   test("enables beta layout from either the flag or environment", () => {
-    expect(parseArguments(["--rudder", "/tmp/rudder"], {}).beta).toBe(false);
+    expect(parseArguments(["--ruddr", "/tmp/ruddr"], {}).beta).toBe(false);
     expect(
-      parseArguments(["--rudder", "/tmp/rudder", "--beta"], {}).beta,
+      parseArguments(["--ruddr", "/tmp/ruddr", "--beta"], {}).beta,
     ).toBe(true);
     expect(
-      parseArguments(["--rudder", "/tmp/rudder"], {
-        RUDDER_TUI_BETA: "1",
+      parseArguments(["--ruddr", "/tmp/ruddr"], {
+        RUDDR_TUI_BETA: "1",
       }).beta,
     ).toBe(true);
   });
@@ -225,7 +225,7 @@ describe("async task gate", () => {
 
 describe("session discovery", () => {
   test("recurses, skips invalid state, marks dead runs stale, and sorts active first", async () => {
-    const root = await mkdtemp(join(tmpdir(), "rudder-tui-discovery-"));
+    const root = await mkdtemp(join(tmpdir(), "ruddr-tui-discovery-"));
     const activeDir = join(root, "nested", "active");
     const staleDir = join(root, "stale");
     await mkdir(activeDir, { recursive: true });
@@ -254,7 +254,7 @@ describe("session discovery", () => {
   });
 
   test("discovers runs referenced by the global registry", async () => {
-    const root = await mkdtemp(join(tmpdir(), "rudder-tui-registry-"));
+    const root = await mkdtemp(join(tmpdir(), "ruddr-tui-registry-"));
     const registryDir = join(root, "registry");
     const stateDir = join(root, "outside-project", "run");
     await mkdir(registryDir, { recursive: true });
@@ -718,7 +718,7 @@ describe("artifact and display helpers", () => {
   });
 
   test("deletes finished session state and its registry entries only", async () => {
-    const root = await mkdtemp(join(tmpdir(), "rudder-delete-"));
+    const root = await mkdtemp(join(tmpdir(), "ruddr-delete-"));
     const stateDir = join(root, "runs", "done.run");
     const registry = join(root, "registry");
     const otherDir = join(root, "runs", "other.run");
@@ -766,7 +766,7 @@ describe("artifact and display helpers", () => {
   });
 
   test("reads only complete lines from a bounded tail", async () => {
-    const root = await mkdtemp(join(tmpdir(), "rudder-tui-tail-"));
+    const root = await mkdtemp(join(tmpdir(), "ruddr-tui-tail-"));
     const artifact = join(root, "trace.log");
     await writeFile(artifact, "first\nsecond\nthird\n");
     expect(await readTail(artifact, 13)).toBe("second\nthird");
@@ -1369,14 +1369,14 @@ describe("promptable TUI helpers", () => {
 
   test("builds a chat transcript from events.jsonl", () => {
     const lines = [
-      { method: "item/completed", params: { threadId: "root", item: { type: "userMessage", origin: "rudder", text: "do the thing" } } },
+      { method: "item/completed", params: { threadId: "root", item: { type: "userMessage", origin: "ruddr", text: "do the thing" } } },
       { method: "item/started", params: { threadId: "root", item: { id: "cmd-1", type: "commandExecution", command: "bun test" } } },
       { method: "item/completed", params: { threadId: "root", item: { id: "cmd-1", type: "commandExecution", command: "bun test", exitCode: 0 } } },
       { method: "item/completed", params: { threadId: "sub", item: { id: "sub-1", type: "commandExecution", command: "hidden" } } },
       { method: "item/completed", params: { threadId: "root", item: { type: "agentMessage", text: "done" } } },
-      { method: "item/completed", params: { threadId: "root", item: { type: "userMessage", origin: "rudder", text: "now this" } } },
-      { method: "item/completed", params: { threadId: "root", item: { id: "prompt-rejected", type: "userMessage", origin: "rudder", text: "do not show" } } },
-      { method: "rudder/prompt/rejected", params: { promptId: "prompt-rejected" } },
+      { method: "item/completed", params: { threadId: "root", item: { type: "userMessage", origin: "ruddr", text: "now this" } } },
+      { method: "item/completed", params: { threadId: "root", item: { id: "prompt-rejected", type: "userMessage", origin: "ruddr", text: "do not show" } } },
+      { method: "ruddr/prompt/rejected", params: { promptId: "prompt-rejected" } },
     ]
       .map((line) => JSON.stringify(line))
       .join("\n");

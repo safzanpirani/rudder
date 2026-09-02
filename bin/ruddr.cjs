@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// npm launcher: runs the native Rudder binary that lives beside the TUI and
+// npm launcher: runs the native Ruddr binary that lives beside the TUI and
 // adapter sources in this package, so the binary's sibling lookup finds them.
 "use strict";
 

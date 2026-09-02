@@ -35,10 +35,10 @@ jobs:
           ext=""
           [ "$GOOS" = "windows" ] && ext=".exe"
           mkdir -p dist
-          go build -trimpath -ldflags "-s -w" -o "dist/rudder-${GOOS}-${GOARCH}${ext}" .
+          go build -trimpath -ldflags "-s -w" -o "dist/ruddr-${GOOS}-${GOARCH}${ext}" .
       - uses: actions/upload-artifact@v4
         with:
-          name: rudder-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: ruddr-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
           if-no-files-found: error
 
@@ -69,19 +69,19 @@ jobs:
           test "$tag" = "$declared" || { echo "tag v$tag does not match main.go version $declared"; exit 1; }
       - name: Test
         run: |
-          bun install --frozen-lockfile
+          bun install --frozen-lockfile --ignore-scripts
           go test ./...
           bun test
       - name: Checksums
         run: |
           cd dist
-          sha256sum rudder-* > checksums.txt
+          sha256sum ruddr-* > checksums.txt
           cat checksums.txt
       - name: GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/rudder-*
+            dist/ruddr-*
             dist/checksums.txt
           generate_release_notes: true
       - name: Prepare npm package

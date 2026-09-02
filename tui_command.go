@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	tuiEntryEnvironment       = "RUDDER_TUI_ENTRY"
-	legacyTUIEntryEnvironment = "CODEX_RUDDER_TUI_ENTRY"
+	tuiEntryEnvironment         = "RUDDR_TUI_ENTRY"
+	previousTUIEntryEnvironment = "RUDDER_TUI_ENTRY"
+	legacyTUIEntryEnvironment   = "CODEX_RUDDER_TUI_ENTRY"
 )
 
 func tuiCommand(args []string) error {
@@ -27,16 +28,16 @@ func tuiCommand(args []string) error {
 	if err != nil {
 		return errors.New("the optional TUI requires Bun 1.4 or newer; install Bun and run again")
 	}
-	registerRunningRudderRuns()
+	registerRunningRuddrRuns()
 	entryPath, err := findTUIEntry()
 	if err != nil {
 		return err
 	}
-	rudderPath, err := os.Executable()
+	ruddrPath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("locate Rudder executable: %w", err)
+		return fmt.Errorf("locate Ruddr executable: %w", err)
 	}
-	cmd := newTUIProcess(bunPath, entryPath, rudderPath, args)
+	cmd := newTUIProcess(bunPath, entryPath, ruddrPath, args)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -46,15 +47,15 @@ func tuiCommand(args []string) error {
 	return nil
 }
 
-func newTUIProcess(bunPath, entryPath, rudderPath string, args []string) *exec.Cmd {
-	childArgs := []string{"run", entryPath, "--rudder", rudderPath}
+func newTUIProcess(bunPath, entryPath, ruddrPath string, args []string) *exec.Cmd {
+	childArgs := []string{"run", entryPath, "--ruddr", ruddrPath}
 	childArgs = append(childArgs, args...)
 	return exec.Command(bunPath, childArgs...)
 }
 
 func printTUIUsage() {
 	name := filepath.Base(os.Args[0])
-	fmt.Fprintf(os.Stderr, `Rudder live sessions TUI
+	fmt.Fprintf(os.Stderr, `Ruddr live sessions TUI
 
 Usage:
   %s tui [--root DIR]... [--state-dir DIR]... [--all] [--interval 500ms] [--theme NAME] [--beta]
@@ -64,15 +65,15 @@ Shows live runs first, then every finished run from the global registry plus
 --all is accepted for compatibility and has no effect.
 The refresh interval accepts milliseconds or seconds and must be at least 100ms.
 Press t inside the TUI to preview and save a theme. --theme overrides the saved
-theme for one launch; RUDDER_TUI_THEME provides the same environment override.
---beta enables the chat-first layout; RUDDER_TUI_BETA=1 provides the same
+theme for one launch; RUDDR_TUI_THEME provides the same environment override.
+--beta enables the chat-first layout; RUDDR_TUI_BETA=1 provides the same
 override. The default layout keeps the sessions dashboard visible.
 `, name)
 }
 
 func findTUIEntry() (string, error) {
 	var candidates []string
-	for _, environment := range []string{tuiEntryEnvironment, legacyTUIEntryEnvironment} {
+	for _, environment := range []string{tuiEntryEnvironment, previousTUIEntryEnvironment, legacyTUIEntryEnvironment} {
 		if configured := os.Getenv(environment); configured != "" {
 			candidates = append(candidates, configured)
 		}
@@ -83,11 +84,10 @@ func findTUIEntry() (string, error) {
 	if executable, err := os.Executable(); err == nil {
 		candidates = appendRuntimeSiblingCandidates(candidates, executable, "tui", "index.ts")
 	}
-	if dataHome, err := rudderDataHome(); err == nil {
-		candidates = append(candidates,
-			filepath.Join(dataHome, "rudder", "tui", "index.ts"),
-			filepath.Join(dataHome, "codex-rudder", "tui", "index.ts"),
-		)
+	if dataHome, err := ruddrDataHome(); err == nil {
+		for _, name := range installDirectoryNames {
+			candidates = append(candidates, filepath.Join(dataHome, name, "tui", "index.ts"))
+		}
 	}
 	for _, candidate := range candidates {
 		absolute, err := filepath.Abs(candidate)
@@ -102,7 +102,7 @@ func findTUIEntry() (string, error) {
 	return "", fmt.Errorf("cannot locate tui/index.ts; run the installer or set %s", tuiEntryEnvironment)
 }
 
-func rudderDataHome() (string, error) {
+func ruddrDataHome() (string, error) {
 	if configured := os.Getenv("XDG_DATA_HOME"); configured != "" {
 		return configured, nil
 	}

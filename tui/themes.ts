@@ -19,7 +19,7 @@ export interface ThemePalette {
 export interface ThemeDefinition {
   name: string;
   label: string;
-  source: "Rudder" | "OpenCode";
+  source: "Ruddr" | "OpenCode";
   palette: ThemePalette;
 }
 
@@ -30,9 +30,9 @@ export interface TUIConfig {
   diffTreeRatio?: number;
 }
 
-export const defaultThemeName = "rudder";
+export const defaultThemeName = "ruddr";
 
-const rudderPalette: ThemePalette = {
+const ruddrPalette: ThemePalette = {
   background: "#101318",
   panel: "#171b22",
   border: "#343b48",
@@ -72,9 +72,9 @@ function titleCase(name: string): string {
 export const themes: ThemeDefinition[] = [
   {
     name: defaultThemeName,
-    label: "Rudder",
-    source: "Rudder",
-    palette: rudderPalette,
+    label: "Ruddr",
+    source: "Ruddr",
+    palette: ruddrPalette,
   },
   ...Object.entries(openCodeThemes).map(([name, palette]) => ({
     name,
@@ -103,12 +103,16 @@ export function resolveThemeName(
 
 export function themeConfigPath(environment = process.env): string {
   const configHome = environment.XDG_CONFIG_HOME || join(homedir(), ".config");
-	return join(configHome, "rudder", "tui.json");
+	return join(configHome, "ruddr", "tui.json");
 }
 
-function legacyThemeConfigPath(environment = process.env): string {
+/** Config files written by earlier releases, newest name first. */
+function previousThemeConfigPaths(environment = process.env): string[] {
   const configHome = environment.XDG_CONFIG_HOME || join(homedir(), ".config");
-  return join(configHome, "codex-rudder", "tui.json");
+  return [
+    join(configHome, "rudder", "tui.json"),
+    join(configHome, "codex-rudder", "tui.json"),
+  ];
 }
 
 export async function readPersistedTheme(
@@ -117,7 +121,10 @@ export async function readPersistedTheme(
   return (await readTUIConfig(configFile)).theme;
 }
 
-export async function readTUIConfig(configFile?: string): Promise<TUIConfig> {
+export async function readTUIConfig(
+  configFile?: string,
+  fallbacks: string[] = configFile === undefined ? previousThemeConfigPaths() : [],
+): Promise<TUIConfig> {
   const selectedPath = configFile ?? themeConfigPath();
   try {
     const parsed = JSON.parse(await readFile(selectedPath, "utf8")) as unknown;
@@ -139,8 +146,8 @@ export async function readTUIConfig(configFile?: string): Promise<TUIConfig> {
     };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" && configFile === undefined)
-      return readTUIConfig(legacyThemeConfigPath());
+    if (code === "ENOENT" && fallbacks.length > 0)
+      return readTUIConfig(fallbacks[0], fallbacks.slice(1));
     if (code === "ENOENT" || error instanceof SyntaxError) return {};
     throw error;
   }

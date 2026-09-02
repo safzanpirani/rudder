@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { ClaudeRudderAdapter, type ProtocolMessage, type RPCRequest } from "./runtime";
+import { ClaudeRuddrAdapter, type ProtocolMessage, type RPCRequest } from "./runtime";
 
 const MAX_LINE_BYTES = 64 * 1024 * 1024;
 const stdout = Bun.stdout.writer();
@@ -15,7 +15,7 @@ function emit(message: ProtocolMessage): Promise<void> {
   return writeChain;
 }
 
-const adapter = new ClaudeRudderAdapter(emit);
+const adapter = new ClaudeRuddrAdapter(emit);
 let closing = false;
 
 async function close(): Promise<void> {

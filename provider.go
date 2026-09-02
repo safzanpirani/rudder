@@ -15,14 +15,15 @@ const (
 	providerOpenCode = "opencode"
 	providerPi       = "pi"
 
-	claudeAdapterEntryEnvironment       = "RUDDER_CLAUDE_ADAPTER_ENTRY"
-	legacyClaudeAdapterEntryEnvironment = "CODEX_RUDDER_CLAUDE_ADAPTER_ENTRY"
+	claudeAdapterEntryEnvironment         = "RUDDR_CLAUDE_ADAPTER_ENTRY"
+	previousClaudeAdapterEntryEnvironment = "RUDDER_CLAUDE_ADAPTER_ENTRY"
+	legacyClaudeAdapterEntryEnvironment   = "CODEX_RUDDER_CLAUDE_ADAPTER_ENTRY"
 
-	claudePathEnvironment           = "RUDDER_CLAUDE_PATH"
-	opencodePathEnvironment         = "RUDDER_OPENCODE_PATH"
-	piPathEnvironment               = "RUDDER_PI_PATH"
-	opencodeAdapterEntryEnvironment = "RUDDER_OPENCODE_ADAPTER_ENTRY"
-	piAdapterEntryEnvironment       = "RUDDER_PI_ADAPTER_ENTRY"
+	claudePathEnvironment           = "RUDDR_CLAUDE_PATH"
+	opencodePathEnvironment         = "RUDDR_OPENCODE_PATH"
+	piPathEnvironment               = "RUDDR_PI_PATH"
+	opencodeAdapterEntryEnvironment = "RUDDR_OPENCODE_ADAPTER_ENTRY"
+	piAdapterEntryEnvironment       = "RUDDR_PI_ADAPTER_ENTRY"
 )
 
 func normalizeProvider(provider string) (string, error) {
@@ -90,7 +91,7 @@ func configureProviderDefaults(cfg *runConfig, childArgs []string) error {
 			cfg.ProviderPath = cfg.PiPath
 		}
 		if cfg.ProviderPath == "" {
-			cfg.ProviderPath = os.Getenv(pathEnvironment)
+			cfg.ProviderPath = getenvAny(pathEnvironment, previousName(pathEnvironment))
 		}
 		if cfg.ProviderPath == "" {
 			for _, name := range executableNames {
@@ -118,17 +119,16 @@ func configureProviderDefaults(cfg *runConfig, childArgs []string) error {
 
 func findAdapterEntry(environment string, parts ...string) (string, error) {
 	var candidates []string
-	if configured := os.Getenv(environment); configured != "" {
+	if configured := getenvAny(environment, previousName(environment)); configured != "" {
 		candidates = append(candidates, configured)
 	}
 	if executable, err := os.Executable(); err == nil {
 		candidates = appendRuntimeSiblingCandidates(candidates, executable, parts...)
 	}
-	if dataHome, err := rudderDataHome(); err == nil {
-		candidates = append(candidates,
-			filepath.Join(append([]string{dataHome, "rudder"}, parts...)...),
-			filepath.Join(append([]string{dataHome, "codex-rudder"}, parts...)...),
-		)
+	if dataHome, err := ruddrDataHome(); err == nil {
+		for _, name := range installDirectoryNames {
+			candidates = append(candidates, filepath.Join(append([]string{dataHome, name}, parts...)...))
+		}
 	}
 	for _, candidate := range candidates {
 		absolute, err := filepath.Abs(candidate)
@@ -145,7 +145,7 @@ func findAdapterEntry(environment string, parts ...string) (string, error) {
 
 func findClaudeAdapterEntry() (string, error) {
 	var candidates []string
-	for _, environment := range []string{claudeAdapterEntryEnvironment, legacyClaudeAdapterEntryEnvironment} {
+	for _, environment := range []string{claudeAdapterEntryEnvironment, previousClaudeAdapterEntryEnvironment, legacyClaudeAdapterEntryEnvironment} {
 		if configured := os.Getenv(environment); configured != "" {
 			candidates = append(candidates, configured)
 		}
@@ -153,11 +153,10 @@ func findClaudeAdapterEntry() (string, error) {
 	if executable, err := os.Executable(); err == nil {
 		candidates = appendRuntimeSiblingCandidates(candidates, executable, "claude", "app-server.ts")
 	}
-	if dataHome, err := rudderDataHome(); err == nil {
-		candidates = append(candidates,
-			filepath.Join(dataHome, "rudder", "claude", "app-server.ts"),
-			filepath.Join(dataHome, "codex-rudder", "claude", "app-server.ts"),
-		)
+	if dataHome, err := ruddrDataHome(); err == nil {
+		for _, name := range installDirectoryNames {
+			candidates = append(candidates, filepath.Join(dataHome, name, "claude", "app-server.ts"))
+		}
 	}
 	for _, candidate := range candidates {
 		absolute, err := filepath.Abs(candidate)
@@ -170,6 +169,16 @@ func findClaudeAdapterEntry() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("cannot locate claude/app-server.ts; run the installer or set %s", claudeAdapterEntryEnvironment)
+}
+
+// installDirectoryNames lists install roots newest first: the current name,
+// then the names earlier releases used.
+var installDirectoryNames = []string{"ruddr", "rudder", "codex-rudder"}
+
+// previousName maps a RUDDR_* variable to the RUDDER_* spelling that earlier
+// releases read, so existing shell configuration keeps working.
+func previousName(environment string) string {
+	return "RUDDER_" + strings.TrimPrefix(environment, "RUDDR_")
 }
 
 func appendRuntimeSiblingCandidates(candidates []string, executable string, parts ...string) []string {

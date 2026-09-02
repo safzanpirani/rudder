@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Instructions for coding agents working in Codex Rudder.
+Instructions for coding agents working in Codex Ruddr.
 
 ## Start here
 
@@ -8,7 +8,7 @@ Read `README.md` before changing behavior. It defines the user-facing CLI,
 artifact contract, app-server composition, and supported Codex version. Inspect
 `PAPERCUTS.md` for known workflow friction before debugging tooling failures.
 
-This is a small Go control plane around `codex app-server`. Keep it thin. Rudder
+This is a small Go control plane around `codex app-server`. Keep it thin. Ruddr
 owns process lifecycle, JSON-RPC transport, persisted run state, live steering,
 and thread-history operations; it does not own authentication, model behavior,
 or repository business logic.
@@ -85,19 +85,19 @@ codex --version
 ```
 
 Update the compatibility statement in `README.md` when support is verified
-against a newer CLI. Use string JSON-RPC IDs for Rudder-originated calls, but
+against a newer CLI. Use string JSON-RPC IDs for Ruddr-originated calls, but
 continue accepting valid string or numeric response IDs from the server.
 Reject server-initiated interactive requests explicitly; do not let them hang.
 
 If the run uses a command after `--` (for example the private auth broker), the
-child must remain a transparent stdio-compatible app-server. Rudder must never
+child must remain a transparent stdio-compatible app-server. Ruddr must never
 special-case or inspect its credentials.
 
 ## Development workflow
 
 Work from the repository root. Preserve unrelated user changes. Search exact
 symbols with `rg`; use `gofmt` for Go formatting. Do not commit the generated
-`rudder` binary, run directories, sockets, schema dumps, or dogfood artifacts.
+`ruddr` binary, run directories, sockets, schema dumps, or dogfood artifacts.
 
 After modifying Go code, run:
 
@@ -105,13 +105,13 @@ After modifying Go code, run:
 gofmt -w *.go
 go test ./...
 go vet ./...
-go build -o rudder .
+go build -o ruddr .
 git diff --check
 ```
 
 The binary is ignored; remove or leave it untracked only if `.gitignore`
 continues to cover it. For documentation-only changes, at minimum run
-`git diff --check` and verify every command against `./rudder --help` or the
+`git diff --check` and verify every command against `./ruddr --help` or the
 relevant subcommand parser.
 
 ## Testing expectations
@@ -132,7 +132,7 @@ relevant subcommand parser.
 ## Git and release hygiene
 
 The canonical remote is `origin` at the public GitHub repository
-`safzanpirani/rudder`; the default branch is `main`. Do not change
+`safzanpirani/ruddr`; the default branch is `main`. Do not change
 visibility, add collaborators, publish releases, or push tags unless the user
 asks. Never commit private broker URLs, secret-file contents, session
 transcripts, or local run artifacts.

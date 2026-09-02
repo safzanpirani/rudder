@@ -2,7 +2,7 @@
 
 ## Claude Agent SDK
 
-Rudder uses `@anthropic-ai/claude-agent-sdk` to launch and stream Claude Code
+Ruddr uses `@anthropic-ai/claude-agent-sdk` to launch and stream Claude Code
 sessions.
 
 Copyright Anthropic PBC. All rights reserved. Use is subject to Anthropic's

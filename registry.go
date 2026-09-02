@@ -11,13 +11,26 @@ import (
 )
 
 const (
-	registryDirectoryEnvironment       = "RUDDER_REGISTRY_DIR"
-	legacyRegistryDirectoryEnvironment = "CODEX_RUDDER_REGISTRY_DIR"
+	registryDirectoryEnvironment = "RUDDR_REGISTRY_DIR"
+	// Earlier releases were named rudder and codex-rudder; their settings and
+	// on-disk locations keep working after the rename.
+	previousRegistryDirectoryEnvironment = "RUDDER_REGISTRY_DIR"
+	legacyRegistryDirectoryEnvironment   = "CODEX_RUDDER_REGISTRY_DIR"
 )
 
+// getenvAny returns the first non-empty variable from the given names.
+func getenvAny(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 var (
-	rudderRunPattern = regexp.MustCompile(`(?:^|/)rudder\s+run(?:\s|$)`)
-	stateDirPattern  = regexp.MustCompile(`(?:^|\s)--state-dir(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`)
+	ruddrRunPattern = regexp.MustCompile(`(?:^|/)ruddr\s+run(?:\s|$)`)
+	stateDirPattern = regexp.MustCompile(`(?:^|\s)--state-dir(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`)
 )
 
 func registerRunStateDir(stateDir string) error {
@@ -41,29 +54,26 @@ func registerRunStateDir(stateDir string) error {
 }
 
 func runRegistryDirectory() (string, error) {
-	if configured := os.Getenv(registryDirectoryEnvironment); configured != "" {
-		return filepath.Abs(configured)
-	}
-	if configured := os.Getenv(legacyRegistryDirectoryEnvironment); configured != "" {
+	if configured := getenvAny(registryDirectoryEnvironment, previousRegistryDirectoryEnvironment, legacyRegistryDirectoryEnvironment); configured != "" {
 		return filepath.Abs(configured)
 	}
 	if stateHome := os.Getenv("XDG_STATE_HOME"); stateHome != "" {
-		return filepath.Join(stateHome, "rudder", "runs"), nil
+		return filepath.Join(stateHome, "ruddr", "runs"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".local", "state", "rudder", "runs"), nil
+	return filepath.Join(home, ".local", "state", "ruddr", "runs"), nil
 }
 
-func registerRunningRudderRuns() {
+func registerRunningRuddrRuns() {
 	output, err := exec.Command("ps", "-axo", "command=").Output()
 	if err != nil {
 		return
 	}
 	for _, command := range strings.Split(string(output), "\n") {
-		stateDir, ok := runningRudderStateDir(command)
+		stateDir, ok := runningRuddrStateDir(command)
 		if !ok {
 			continue
 		}
@@ -75,8 +85,8 @@ func registerRunningRudderRuns() {
 	}
 }
 
-func runningRudderStateDir(command string) (string, bool) {
-	if !rudderRunPattern.MatchString(command) {
+func runningRuddrStateDir(command string) (string, bool) {
+	if !ruddrRunPattern.MatchString(command) {
 		return "", false
 	}
 	match := stateDirPattern.FindStringSubmatch(command)

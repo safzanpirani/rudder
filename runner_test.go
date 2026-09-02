@@ -60,7 +60,7 @@ func TestControlSocketLocationIsPrivateAndLengthSafe(t *testing.T) {
 
 func TestControlCleanupDoesNotRemoveUnownedSocketPath(t *testing.T) {
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, ".rudder.sock")
+	socketPath := filepath.Join(dir, ".ruddr.sock")
 	if err := os.WriteFile(socketPath, []byte("not a socket"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestNewStateStoreRejectsTerminalStateDirectoryReuse(t *testing.T) {
 		Model:    "test-model",
 		Sandbox:  "read-only",
 	})
-	if err == nil || !strings.Contains(err.Error(), "already contains a Rudder run") {
+	if err == nil || !strings.Contains(err.Error(), "already contains a Ruddr run") {
 		t.Fatalf("state directory reuse error = %v", err)
 	}
 	for name, want := range artifacts {
@@ -177,7 +177,7 @@ func TestNewStateStoreRejectsArtifactsWithoutState(t *testing.T) {
 				Model:    "test-model",
 				Sandbox:  "read-only",
 			})
-			if err == nil || !strings.Contains(err.Error(), "already contains Rudder artifact "+name) {
+			if err == nil || !strings.Contains(err.Error(), "already contains Ruddr artifact "+name) {
 				t.Fatalf("artifact-only state directory error = %v", err)
 			}
 			got, readErr := os.ReadFile(artifactPath)
@@ -226,7 +226,7 @@ func TestNewStateStoreAtomicallyClaimsStateDirectory(t *testing.T) {
 		result := <-results
 		if result.err != nil {
 			failed++
-			if !strings.Contains(result.err.Error(), "claimed by another Rudder run") {
+			if !strings.Contains(result.err.Error(), "claimed by another Ruddr run") {
 				t.Fatalf("losing state claim error = %v", result.err)
 			}
 			continue
@@ -324,7 +324,7 @@ func TestRPCIDAcceptsStringAndIntegerIDs(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		{name: "string", raw: `"rudder-1"`, want: "rudder-1", ok: true},
+		{name: "string", raw: `"ruddr-1"`, want: "ruddr-1", ok: true},
 		{name: "integer", raw: `42`, want: "42", ok: true},
 		{name: "negative integer", raw: `-7`, want: "-7", ok: true},
 		{name: "empty string", raw: `""`},
@@ -355,7 +355,7 @@ func TestTailLines(t *testing.T) {
 }
 
 func TestLiveSteerOverControlSocket(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -365,7 +365,7 @@ func TestLiveSteerOverControlSocket(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("Initially say ORIGINAL"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- runController(runConfig{
@@ -435,7 +435,7 @@ func TestLiveSteerOverControlSocket(t *testing.T) {
 }
 
 func TestInterruptPreservesInterruptedStatus(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -445,7 +445,7 @@ func TestInterruptPreservesInterruptedStatus(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("stay active"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- runController(runConfig{
@@ -479,7 +479,7 @@ func TestInterruptPreservesInterruptedStatus(t *testing.T) {
 }
 
 func TestInterruptAcknowledgementForcesLocalTeardown(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -489,11 +489,11 @@ func TestInterruptAcknowledgementForcesLocalTeardown(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("stay active"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
-	t.Setenv("GO_WANT_RUDDER_INTERRUPT_ACK_ONLY", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_INTERRUPT_ACK_ONLY", "1")
 	grandchildPIDFile := filepath.Join(dir, "grandchild.pid")
 	if runtime.GOOS != "windows" {
-		t.Setenv("GO_WANT_RUDDER_GRANDCHILD_PID_FILE", grandchildPIDFile)
+		t.Setenv("GO_WANT_RUDDR_GRANDCHILD_PID_FILE", grandchildPIDFile)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -564,7 +564,7 @@ func TestInterruptAcknowledgementForcesLocalTeardown(t *testing.T) {
 }
 
 func TestResumeAndForkThreadBeforeTurn(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -584,8 +584,8 @@ func TestResumeAndForkThreadBeforeTurn(t *testing.T) {
 			if err := os.WriteFile(promptPath, []byte("continue the task"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv("GO_WANT_RUDDER_HELPER", "1")
-			t.Setenv("GO_WANT_RUDDER_COMPLETE_ON_START", "1")
+			t.Setenv("GO_WANT_RUDDR_HELPER", "1")
+			t.Setenv("GO_WANT_RUDDR_COMPLETE_ON_START", "1")
 			err := runController(runConfig{
 				CWD:            dir,
 				PromptFile:     promptPath,
@@ -612,7 +612,7 @@ func TestResumeAndForkThreadBeforeTurn(t *testing.T) {
 }
 
 func TestForkBoundarySelectorsReachAppServer(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -622,8 +622,8 @@ func TestForkBoundarySelectorsReachAppServer(t *testing.T) {
 		throughID string
 		expectEnv string
 	}{
-		{name: "before-turn-excludes-boundary", beforeID: "turn-old", expectEnv: "GO_WANT_RUDDER_EXPECT_FORK_BEFORE"},
-		{name: "through-turn-includes-boundary", throughID: "turn-new", expectEnv: "GO_WANT_RUDDER_EXPECT_FORK_THROUGH"},
+		{name: "before-turn-excludes-boundary", beforeID: "turn-old", expectEnv: "GO_WANT_RUDDR_EXPECT_FORK_BEFORE"},
+		{name: "through-turn-includes-boundary", throughID: "turn-new", expectEnv: "GO_WANT_RUDDR_EXPECT_FORK_THROUGH"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -632,8 +632,8 @@ func TestForkBoundarySelectorsReachAppServer(t *testing.T) {
 			if err := os.WriteFile(promptPath, []byte("alternate approach"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv("GO_WANT_RUDDER_HELPER", "1")
-			t.Setenv("GO_WANT_RUDDER_COMPLETE_ON_START", "1")
+			t.Setenv("GO_WANT_RUDDR_HELPER", "1")
+			t.Setenv("GO_WANT_RUDDR_COMPLETE_ON_START", "1")
 			want := test.beforeID + test.throughID
 			t.Setenv(test.expectEnv, want)
 			err := runController(runConfig{
@@ -663,7 +663,7 @@ func TestForkBoundarySelectorsReachAppServer(t *testing.T) {
 }
 
 func TestForkInvalidTurnFailsRun(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -673,7 +673,7 @@ func TestForkInvalidTurnFailsRun(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("alternate approach"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
 	err := runController(runConfig{
 		CWD:              dir,
 		PromptFile:       promptPath,
@@ -698,7 +698,7 @@ func TestForkInvalidTurnFailsRun(t *testing.T) {
 }
 
 func TestResumeSendsCleanParams(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -708,9 +708,9 @@ func TestResumeSendsCleanParams(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("continue"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
-	t.Setenv("GO_WANT_RUDDER_COMPLETE_ON_START", "1")
-	t.Setenv("GO_WANT_RUDDER_EXPECT_RESUME_PARAMS", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_COMPLETE_ON_START", "1")
+	t.Setenv("GO_WANT_RUDDR_EXPECT_RESUME_PARAMS", "1")
 	err := runController(runConfig{
 		CWD:            dir,
 		PromptFile:     promptPath,
@@ -807,7 +807,7 @@ func TestWaitTimeoutParsesGoDurations(t *testing.T) {
 }
 
 func TestRunCommandRequiresExplicitChildSeparator(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -825,8 +825,8 @@ func TestRunCommandRequiresExplicitChildSeparator(t *testing.T) {
 		t.Fatalf("empty child command error = %v", err)
 	}
 
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
-	t.Setenv("GO_WANT_RUDDER_COMPLETE_ON_START", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_COMPLETE_ON_START", "1")
 	args := []string{
 		"--prompt-file", promptPath,
 		"--state-dir", filepath.Join(dir, "explicit-run"),
@@ -838,11 +838,11 @@ func TestRunCommandRequiresExplicitChildSeparator(t *testing.T) {
 }
 
 func TestThreadListRPC(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
 	raw, err := invokeAppServer(t.TempDir(), []string{os.Args[0], "-test.run=TestThreadListRPC"}, "thread/list", map[string]any{"limit": 2})
 	if err != nil {
 		t.Fatal(err)
@@ -862,11 +862,11 @@ func TestThreadListRPC(t *testing.T) {
 }
 
 func TestThreadSubcommands(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
 	child := []string{"--", os.Args[0], "-test.run=TestThreadSubcommands"}
 	tests := []struct {
 		name string
@@ -927,7 +927,7 @@ func TestValidateRunConfigRejectsConflictingThreadModes(t *testing.T) {
 }
 
 func TestEphemeralRunPassesThreadOption(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -936,9 +936,9 @@ func TestEphemeralRunPassesThreadOption(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("ephemeral task"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
-	t.Setenv("GO_WANT_RUDDER_EXPECT_EPHEMERAL", "1")
-	t.Setenv("GO_WANT_RUDDER_COMPLETE_ON_START", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_EXPECT_EPHEMERAL", "1")
+	t.Setenv("GO_WANT_RUDDR_COMPLETE_ON_START", "1")
 	err := runController(runConfig{
 		CWD:            dir,
 		PromptFile:     promptPath,
@@ -1004,7 +1004,7 @@ func TestDisplayedStateMarksDeadControllerStale(t *testing.T) {
 }
 
 func TestCanceledRunCleansUpChildSocketAndState(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -1014,10 +1014,10 @@ func TestCanceledRunCleansUpChildSocketAndState(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("stay active"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
 	grandchildPIDFile := filepath.Join(dir, "grandchild.pid")
 	if runtime.GOOS != "windows" {
-		t.Setenv("GO_WANT_RUDDER_GRANDCHILD_PID_FILE", grandchildPIDFile)
+		t.Setenv("GO_WANT_RUDDR_GRANDCHILD_PID_FILE", grandchildPIDFile)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -1084,7 +1084,7 @@ func TestCanceledRunCleansUpChildSocketAndState(t *testing.T) {
 }
 
 func TestTurnWatchdogStopsHungRun(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -1094,7 +1094,7 @@ func TestTurnWatchdogStopsHungRun(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("stay active"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
 	err := runController(runConfig{
 		CWD:            dir,
 		PromptFile:     promptPath,
@@ -1206,7 +1206,7 @@ func TestControlAcceptRetriesTemporaryFailure(t *testing.T) {
 }
 
 func TestRunPreservesAgentMessagesAndRedactsPersistedError(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -1216,8 +1216,8 @@ func TestRunPreservesAgentMessagesAndRedactsPersistedError(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("sensitive user prompt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
-	t.Setenv("GO_WANT_RUDDER_MULTI_OUTPUT_ERROR", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_MULTI_OUTPUT_ERROR", "1")
 	err := runController(runConfig{
 		CWD:            dir,
 		PromptFile:     promptPath,
@@ -1254,7 +1254,7 @@ func TestRunPreservesAgentMessagesAndRedactsPersistedError(t *testing.T) {
 }
 
 func TestNestedTurnLifecycleDoesNotReplaceOrCompleteRootTurn(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -1264,8 +1264,8 @@ func TestNestedTurnLifecycleDoesNotReplaceOrCompleteRootTurn(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("delegate and finish"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
-	t.Setenv("GO_WANT_RUDDER_NESTED_TURN", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_NESTED_TURN", "1")
 	err := runController(runConfig{
 		CWD:            dir,
 		PromptFile:     promptPath,
@@ -1295,7 +1295,7 @@ func TestNestedTurnLifecycleDoesNotReplaceOrCompleteRootTurn(t *testing.T) {
 }
 
 func TestChildCommandTraceDoesNotPersistArguments(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -1305,8 +1305,8 @@ func TestChildCommandTraceDoesNotPersistArguments(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("complete"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
-	t.Setenv("GO_WANT_RUDDER_COMPLETE_ON_START", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_COMPLETE_ON_START", "1")
 	const secretArgument = "TOP-SECRET-BEARER-TOKEN"
 	err := runController(runConfig{
 		CWD:            dir,
@@ -1333,7 +1333,7 @@ func TestChildCommandTraceDoesNotPersistArguments(t *testing.T) {
 }
 
 func TestRunDoesNotReportSuccessWhenStatePersistenceFails(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -1343,7 +1343,7 @@ func TestRunDoesNotReportSuccessWhenStatePersistenceFails(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("stay active"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
@@ -1382,7 +1382,7 @@ func TestRunDoesNotReportSuccessWhenStatePersistenceFails(t *testing.T) {
 }
 
 func TestRunFailsWhenAgentOutputCannotBePersisted(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -1392,7 +1392,7 @@ func TestRunFailsWhenAgentOutputCannotBePersisted(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("stay active"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
@@ -1477,15 +1477,15 @@ func waitForRunStatus(t *testing.T, stateDir, want string) runState {
 }
 
 func runHelperAppServer() {
-	if pidFile := os.Getenv("GO_WANT_RUDDER_GRANDCHILD_PID_FILE"); pidFile != "" {
+	if pidFile := os.Getenv("GO_WANT_RUDDR_GRANDCHILD_PID_FILE"); pidFile != "" {
 		var child *exec.Cmd
-		if os.Getenv("GO_WANT_RUDDER_TERM_IGNORING_GRANDCHILD") == "1" {
-			child = exec.Command("sh", "-c", `trap '' TERM; echo $$ > "$1"; while :; do sleep 1; done`, "rudder-grandchild", pidFile)
+		if os.Getenv("GO_WANT_RUDDR_TERM_IGNORING_GRANDCHILD") == "1" {
+			child = exec.Command("sh", "-c", `trap '' TERM; echo $$ > "$1"; while :; do sleep 1; done`, "ruddr-grandchild", pidFile)
 		} else {
 			child = exec.Command("sleep", "60")
 		}
 		if err := child.Start(); err == nil {
-			if os.Getenv("GO_WANT_RUDDER_TERM_IGNORING_GRANDCHILD") != "1" {
+			if os.Getenv("GO_WANT_RUDDR_TERM_IGNORING_GRANDCHILD") != "1" {
 				_ = os.WriteFile(pidFile, []byte(strconv.Itoa(child.Process.Pid)), 0o600)
 			}
 		}
@@ -1506,12 +1506,12 @@ func runHelperAppServer() {
 		}
 		switch request.Method {
 		case "initialize":
-			if os.Getenv("GO_WANT_RUDDER_IGNORE_INITIALIZE") == "1" {
+			if os.Getenv("GO_WANT_RUDDR_IGNORE_INITIALIZE") == "1" {
 				continue
 			}
 			_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "test"}})
 		case "thread/start":
-			if os.Getenv("GO_WANT_RUDDER_EXPECT_EPHEMERAL") == "1" && request.Params["ephemeral"] != true {
+			if os.Getenv("GO_WANT_RUDDR_EXPECT_EPHEMERAL") == "1" && request.Params["ephemeral"] != true {
 				_ = enc.Encode(map[string]any{"id": request.ID, "error": map[string]any{"code": -32602, "message": "ephemeral option missing"}})
 				continue
 			}
@@ -1521,7 +1521,7 @@ func runHelperAppServer() {
 				_ = enc.Encode(map[string]any{"id": request.ID, "error": map[string]any{"code": -32602, "message": "wrong source thread"}})
 				continue
 			}
-			if os.Getenv("GO_WANT_RUDDER_EXPECT_RESUME_PARAMS") == "1" {
+			if os.Getenv("GO_WANT_RUDDR_EXPECT_RESUME_PARAMS") == "1" {
 				if request.Params["excludeTurns"] != true {
 					_ = enc.Encode(map[string]any{"id": request.ID, "error": map[string]any{"code": -32602, "message": "resume missing excludeTurns"}})
 					continue
@@ -1545,7 +1545,7 @@ func runHelperAppServer() {
 				_ = enc.Encode(map[string]any{"id": request.ID, "error": map[string]any{"code": -32602, "message": "unknown turn turn-missing"}})
 				continue
 			}
-			if want := os.Getenv("GO_WANT_RUDDER_EXPECT_FORK_BEFORE"); want != "" {
+			if want := os.Getenv("GO_WANT_RUDDR_EXPECT_FORK_BEFORE"); want != "" {
 				if request.Params["beforeTurnId"] != want {
 					_ = enc.Encode(map[string]any{"id": request.ID, "error": map[string]any{"code": -32602, "message": "beforeTurnId mismatch"}})
 					continue
@@ -1555,7 +1555,7 @@ func runHelperAppServer() {
 					continue
 				}
 			}
-			if want := os.Getenv("GO_WANT_RUDDER_EXPECT_FORK_THROUGH"); want != "" {
+			if want := os.Getenv("GO_WANT_RUDDR_EXPECT_FORK_THROUGH"); want != "" {
 				if request.Params["lastTurnId"] != want {
 					_ = enc.Encode(map[string]any{"id": request.ID, "error": map[string]any{"code": -32602, "message": "lastTurnId mismatch"}})
 					continue
@@ -1582,26 +1582,26 @@ func runHelperAppServer() {
 		case "thread/unarchive":
 			_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{"thread": map[string]any{"id": request.Params["threadId"]}}})
 		case "turn/start":
-			if os.Getenv("GO_WANT_RUDDER_MULTI_TURN") == "1" {
+			if os.Getenv("GO_WANT_RUDDR_MULTI_TURN") == "1" {
 				turnCounter++
 				currentTurn = fmt.Sprintf("turn-%d", turnCounter)
-				if turnCounter > 1 && !rejectedSecondTurn && os.Getenv("GO_WANT_RUDDER_REJECT_SECOND_TURN") == "1" {
+				if turnCounter > 1 && !rejectedSecondTurn && os.Getenv("GO_WANT_RUDDR_REJECT_SECOND_TURN") == "1" {
 					rejectedSecondTurn = true
 					_ = enc.Encode(map[string]any{"id": request.ID, "error": map[string]any{"code": -32602, "message": "second turn rejected"}})
 					turnCounter--
 					currentTurn = fmt.Sprintf("turn-%d", turnCounter)
 					continue
 				}
-				if turnCounter > 1 && os.Getenv("GO_WANT_RUDDER_AMBIGUOUS_SECOND_TURN") == "1" {
+				if turnCounter > 1 && os.Getenv("GO_WANT_RUDDR_AMBIGUOUS_SECOND_TURN") == "1" {
 					_ = enc.Encode(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": "thread-test", "turn": map[string]any{"id": currentTurn, "status": "inProgress"}}})
 					continue
 				}
-				if os.Getenv("GO_WANT_RUDDER_DELAY_TURN_START") == "1" {
+				if os.Getenv("GO_WANT_RUDDR_DELAY_TURN_START") == "1" {
 					time.Sleep(200 * time.Millisecond)
 				}
 				_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{"turn": map[string]any{"id": currentTurn, "status": "inProgress"}}})
 				_ = enc.Encode(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": "thread-test", "turn": map[string]any{"id": currentTurn, "status": "inProgress"}}})
-				if os.Getenv("GO_WANT_RUDDER_MULTI_TURN_HOLD") != "1" {
+				if os.Getenv("GO_WANT_RUDDR_MULTI_TURN_HOLD") != "1" {
 					_ = enc.Encode(map[string]any{"method": "thread/tokenUsage/updated", "params": map[string]any{
 						"threadId": "thread-test",
 						"tokenUsage": map[string]any{
@@ -1611,53 +1611,53 @@ func runHelperAppServer() {
 					}})
 					_ = enc.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"item": map[string]any{"id": fmt.Sprintf("message-%d", turnCounter), "type": "agentMessage", "text": fmt.Sprintf("TURN %d", turnCounter)}}})
 					_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": currentTurn, "status": "completed"}}})
-					if os.Getenv("GO_WANT_RUDDER_EXIT_AFTER_TURN") == "1" {
+					if os.Getenv("GO_WANT_RUDDR_EXIT_AFTER_TURN") == "1" {
 						return
 					}
 				}
 				continue
 			}
-			if os.Getenv("GO_WANT_RUDDER_COMPLETE_BEFORE_TURN_RESPONSE") == "1" {
+			if os.Getenv("GO_WANT_RUDDR_COMPLETE_BEFORE_TURN_RESPONSE") == "1" {
 				_ = enc.Encode(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": "thread-test", "turn": map[string]any{"id": "turn-test", "status": "inProgress"}}})
 				_ = enc.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"item": map[string]any{"id": "message-early", "type": "agentMessage", "text": "EARLY"}}})
 				_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": "turn-test", "status": "completed"}}})
 				_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{"turn": map[string]any{"id": "turn-test", "status": "completed"}}})
 				return
 			}
-			if os.Getenv("GO_WANT_RUDDER_TURN_RESPONSE_NO_ID") == "1" {
+			if os.Getenv("GO_WANT_RUDDR_TURN_RESPONSE_NO_ID") == "1" {
 				_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{"turn": map[string]any{"status": "inProgress"}}})
 				return
 			}
-			if os.Getenv("GO_WANT_RUDDER_EARLY_ITEM_BEFORE_TURN_RESPONSE") == "1" {
+			if os.Getenv("GO_WANT_RUDDR_EARLY_ITEM_BEFORE_TURN_RESPONSE") == "1" {
 				_ = enc.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"item": map[string]any{"id": "message-live", "type": "agentMessage", "text": "LIVE BEFORE RESPONSE"}}})
 			}
-			if delay := os.Getenv("GO_WANT_RUDDER_TURN_RESPONSE_DELAY"); delay != "" {
+			if delay := os.Getenv("GO_WANT_RUDDR_TURN_RESPONSE_DELAY"); delay != "" {
 				if duration, err := time.ParseDuration(delay); err == nil {
 					time.Sleep(duration)
 				}
 			}
 			_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{"turn": map[string]any{"id": "turn-test", "status": "inProgress"}}})
 			_ = enc.Encode(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": "thread-test", "turn": map[string]any{"id": "turn-test", "status": "inProgress"}}})
-			if os.Getenv("GO_WANT_RUDDER_NESTED_TURN") == "1" {
+			if os.Getenv("GO_WANT_RUDDR_NESTED_TURN") == "1" {
 				_ = enc.Encode(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": "thread-child", "turn": map[string]any{"id": "turn-child", "status": "inProgress"}}})
 				_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "thread-child", "turn": map[string]any{"id": "turn-child", "status": "completed"}}})
 				_ = enc.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": "thread-test", "turnId": "turn-test", "item": map[string]any{"id": "message-root", "type": "agentMessage", "text": "ROOT DONE"}}})
 				_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "thread-test", "turn": map[string]any{"id": "turn-test", "status": "completed"}}})
 				continue
 			}
-			if os.Getenv("GO_WANT_RUDDER_MULTI_OUTPUT_ERROR") == "1" {
+			if os.Getenv("GO_WANT_RUDDR_MULTI_OUTPUT_ERROR") == "1" {
 				_ = enc.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"item": map[string]any{"id": "message-first", "type": "agentMessage", "text": "FIRST"}}})
 				_ = enc.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"item": map[string]any{"id": "message-second", "type": "agentMessage", "text": "SECOND"}}})
 				_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": "turn-test", "status": "failed", "error": map[string]any{"code": 99, "message": "SECRET_ECHO from prompt"}}}})
 				continue
 			}
-			if os.Getenv("GO_WANT_RUDDER_COMPLETE_ON_START") == "1" {
+			if os.Getenv("GO_WANT_RUDDR_COMPLETE_ON_START") == "1" {
 				_ = enc.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"item": map[string]any{"id": "message-test", "type": "agentMessage", "text": "DONE"}}})
 				_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": "turn-test", "status": "completed"}}})
 			}
 		case "turn/steer":
 			expectedTurn := "turn-test"
-			if os.Getenv("GO_WANT_RUDDER_MULTI_TURN") == "1" {
+			if os.Getenv("GO_WANT_RUDDR_MULTI_TURN") == "1" {
 				expectedTurn = currentTurn
 			}
 			if request.Params["threadId"] != "thread-test" || request.Params["expectedTurnId"] != expectedTurn {
@@ -1668,18 +1668,18 @@ func runHelperAppServer() {
 			_ = enc.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"item": map[string]any{"id": "message-test", "type": "agentMessage", "text": "STEERED"}}})
 			_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": expectedTurn, "status": "completed"}}})
 		case "turn/interrupt":
-			if os.Getenv("GO_WANT_RUDDER_INTERRUPT_COMPLETE_FIRST") == "1" {
+			if os.Getenv("GO_WANT_RUDDR_INTERRUPT_COMPLETE_FIRST") == "1" {
 				_ = enc.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"turn": map[string]any{"id": currentTurn, "status": "interrupted"}}})
 			}
 			_ = enc.Encode(map[string]any{"id": request.ID, "result": map[string]any{}})
-			if os.Getenv("GO_WANT_RUDDER_EXIT_AFTER_INTERRUPT_ACK") == "1" {
+			if os.Getenv("GO_WANT_RUDDR_EXIT_AFTER_INTERRUPT_ACK") == "1" {
 				return
 			}
-			if os.Getenv("GO_WANT_RUDDER_INTERRUPT_ACK_ONLY") == "1" {
+			if os.Getenv("GO_WANT_RUDDR_INTERRUPT_ACK_ONLY") == "1" {
 				continue
 			}
-			if os.Getenv("GO_WANT_RUDDER_INTERRUPT_COMPLETE_FIRST") != "1" {
-				if delay := os.Getenv("GO_WANT_RUDDER_INTERRUPT_COMPLETION_DELAY"); delay != "" {
+			if os.Getenv("GO_WANT_RUDDR_INTERRUPT_COMPLETE_FIRST") != "1" {
+				if delay := os.Getenv("GO_WANT_RUDDR_INTERRUPT_COMPLETION_DELAY"); delay != "" {
 					if duration, err := time.ParseDuration(delay); err == nil {
 						time.Sleep(duration)
 					}
@@ -1692,7 +1692,7 @@ func runHelperAppServer() {
 			}
 		}
 	}
-	if marker := os.Getenv("GO_WANT_RUDDER_EOF_MARKER"); marker != "" {
+	if marker := os.Getenv("GO_WANT_RUDDR_EOF_MARKER"); marker != "" {
 		_ = os.WriteFile(marker, []byte("stdin closed\n"), 0o600)
 	}
 }
@@ -1709,8 +1709,8 @@ func startIdleHelperRunContext(t *testing.T, ctx context.Context, extraEnv map[s
 	if err := os.WriteFile(promptPath, []byte("FIRST SECRET TASK"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
-	t.Setenv("GO_WANT_RUDDER_MULTI_TURN", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_MULTI_TURN", "1")
 	for key, value := range extraEnv {
 		t.Setenv(key, value)
 	}
@@ -1734,7 +1734,7 @@ func startIdleHelperRunContext(t *testing.T, ctx context.Context, extraEnv map[s
 }
 
 func TestIdlePromptStartsSecondTurn(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -1795,7 +1795,7 @@ func TestIdlePromptStartsSecondTurn(t *testing.T) {
 }
 
 func TestSteerRejectedWhileIdleAndPromptNeverConverts(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -1824,13 +1824,13 @@ func TestSteerRejectedWhileIdleAndPromptNeverConverts(t *testing.T) {
 }
 
 func TestPromptRejectedWhileActiveAndInterruptReturnsToIdle(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
 	stateDir, errCh := startIdleHelperRun(t, map[string]string{
-		"GO_WANT_RUDDER_MULTI_TURN_HOLD":          "1",
-		"GO_WANT_RUDDER_INTERRUPT_COMPLETE_FIRST": "1",
+		"GO_WANT_RUDDR_MULTI_TURN_HOLD":          "1",
+		"GO_WANT_RUDDR_INTERRUPT_COMPLETE_FIRST": "1",
 	}, nil)
 	active := waitForRunStatus(t, stateDir, "active")
 	childPID := active.ChildPID
@@ -1884,7 +1884,7 @@ func TestPromptRejectedWhileActiveAndInterruptReturnsToIdle(t *testing.T) {
 }
 
 func TestAcceptedPromptPrecedesEarlyProviderOutput(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -1894,8 +1894,8 @@ func TestAcceptedPromptPrecedesEarlyProviderOutput(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("EARLY PROMPT"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
-	t.Setenv("GO_WANT_RUDDER_COMPLETE_BEFORE_TURN_RESPONSE", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_COMPLETE_BEFORE_TURN_RESPONSE", "1")
 	if err := runController(runConfig{
 		CWD:            dir,
 		PromptFile:     promptPath,
@@ -1911,7 +1911,7 @@ func TestAcceptedPromptPrecedesEarlyProviderOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	promptIndex := bytes.Index(events, []byte(`"origin":"rudder"`))
+	promptIndex := bytes.Index(events, []byte(`"origin":"ruddr"`))
 	outputIndex := bytes.Index(events, []byte(`"text":"EARLY"`))
 	if promptIndex < 0 || outputIndex < 0 || promptIndex >= outputIndex {
 		t.Fatalf("accepted prompt did not precede provider output:\n%s", events)
@@ -1926,7 +1926,7 @@ func TestAcceptedPromptPrecedesEarlyProviderOutput(t *testing.T) {
 }
 
 func TestProviderEventsRemainVisibleWhileTurnStartIsPending(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -1936,10 +1936,10 @@ func TestProviderEventsRemainVisibleWhileTurnStartIsPending(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("VISIBLE PROMPT"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
-	t.Setenv("GO_WANT_RUDDER_EARLY_ITEM_BEFORE_TURN_RESPONSE", "1")
-	t.Setenv("GO_WANT_RUDDER_TURN_RESPONSE_DELAY", "500ms")
-	t.Setenv("GO_WANT_RUDDER_COMPLETE_ON_START", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_EARLY_ITEM_BEFORE_TURN_RESPONSE", "1")
+	t.Setenv("GO_WANT_RUDDR_TURN_RESPONSE_DELAY", "500ms")
+	t.Setenv("GO_WANT_RUDDR_COMPLETE_ON_START", "1")
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- runController(runConfig{
@@ -1956,7 +1956,7 @@ func TestProviderEventsRemainVisibleWhileTurnStartIsPending(t *testing.T) {
 	for {
 		events, err := os.ReadFile(filepath.Join(stateDir, "events.jsonl"))
 		if err == nil &&
-			bytes.Contains(events, []byte(`"origin":"rudder"`)) &&
+			bytes.Contains(events, []byte(`"origin":"ruddr"`)) &&
 			bytes.Contains(events, []byte(`"text":"LIVE BEFORE RESPONSE"`)) {
 			state, stateErr := readState(stateDir)
 			if stateErr != nil {
@@ -1978,7 +1978,7 @@ func TestProviderEventsRemainVisibleWhileTurnStartIsPending(t *testing.T) {
 }
 
 func TestTurnStartWithoutIDRecordsUnknownPromptOutcome(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -1988,8 +1988,8 @@ func TestTurnStartWithoutIDRecordsUnknownPromptOutcome(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("UNKNOWN PROMPT"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
-	t.Setenv("GO_WANT_RUDDER_TURN_RESPONSE_NO_ID", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_TURN_RESPONSE_NO_ID", "1")
 	err := runController(runConfig{
 		CWD:            dir,
 		PromptFile:     promptPath,
@@ -2006,20 +2006,20 @@ func TestTurnStartWithoutIDRecordsUnknownPromptOutcome(t *testing.T) {
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	if !bytes.Contains(events, []byte(`"method":"rudder/prompt/unknown"`)) ||
-		bytes.Contains(events, []byte(`"method":"rudder/prompt/accepted"`)) {
+	if !bytes.Contains(events, []byte(`"method":"ruddr/prompt/unknown"`)) ||
+		bytes.Contains(events, []byte(`"method":"ruddr/prompt/accepted"`)) {
 		t.Fatalf("missing-ID prompt decision is wrong:\n%s", events)
 	}
 }
 
 func TestIdleInterruptWaitsForProviderCompletion(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
 	stateDir, errCh := startIdleHelperRun(t, map[string]string{
-		"GO_WANT_RUDDER_MULTI_TURN_HOLD":            "1",
-		"GO_WANT_RUDDER_INTERRUPT_COMPLETION_DELAY": "250ms",
+		"GO_WANT_RUDDR_MULTI_TURN_HOLD":            "1",
+		"GO_WANT_RUDDR_INTERRUPT_COMPLETION_DELAY": "250ms",
 	}, nil)
 	waitForRunStatus(t, stateDir, "active")
 	type controlResult struct {
@@ -2055,13 +2055,13 @@ func TestIdleInterruptWaitsForProviderCompletion(t *testing.T) {
 }
 
 func TestIdleInterruptSettlementTimeoutFailsSession(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
 	stateDir, errCh := startIdleHelperRun(t, map[string]string{
-		"GO_WANT_RUDDER_MULTI_TURN_HOLD":    "1",
-		"GO_WANT_RUDDER_INTERRUPT_ACK_ONLY": "1",
+		"GO_WANT_RUDDR_MULTI_TURN_HOLD":    "1",
+		"GO_WANT_RUDDR_INTERRUPT_ACK_ONLY": "1",
 	}, func(cfg *runConfig) {
 		cfg.InterruptTimeout = 50 * time.Millisecond
 	})
@@ -2086,13 +2086,13 @@ func TestIdleInterruptSettlementTimeoutFailsSession(t *testing.T) {
 }
 
 func TestIdleInterruptReportsProviderExitAfterAcknowledgement(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
 	stateDir, errCh := startIdleHelperRun(t, map[string]string{
-		"GO_WANT_RUDDER_MULTI_TURN_HOLD":          "1",
-		"GO_WANT_RUDDER_EXIT_AFTER_INTERRUPT_ACK": "1",
+		"GO_WANT_RUDDR_MULTI_TURN_HOLD":          "1",
+		"GO_WANT_RUDDR_EXIT_AFTER_INTERRUPT_ACK": "1",
 	}, nil)
 	waitForRunStatus(t, stateDir, "active")
 	response, err := sendControl(stateDir, controlRequest{Command: "interrupt"}, 2*time.Second)
@@ -2115,12 +2115,12 @@ func TestIdleInterruptReportsProviderExitAfterAcknowledgement(t *testing.T) {
 }
 
 func TestAmbiguousSecondTurnStartFailsSession(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
 	stateDir, errCh := startIdleHelperRun(t, map[string]string{
-		"GO_WANT_RUDDER_AMBIGUOUS_SECOND_TURN": "1",
+		"GO_WANT_RUDDR_AMBIGUOUS_SECOND_TURN": "1",
 	}, func(cfg *runConfig) {
 		cfg.IdleTurnStartTimeout = 50 * time.Millisecond
 	})
@@ -2145,12 +2145,12 @@ func TestAmbiguousSecondTurnStartFailsSession(t *testing.T) {
 }
 
 func TestRejectedSecondTurnRestoresIdle(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
 	stateDir, errCh := startIdleHelperRun(t, map[string]string{
-		"GO_WANT_RUDDER_REJECT_SECOND_TURN": "1",
+		"GO_WANT_RUDDR_REJECT_SECOND_TURN": "1",
 	}, nil)
 	waitForRunStatus(t, stateDir, "idle")
 	response, err := sendControl(stateDir, controlRequest{Command: "prompt", Text: "rejected turn"}, 2*time.Second)
@@ -2183,13 +2183,13 @@ func TestRejectedSecondTurnRestoresIdle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := bytes.Count(events, []byte(`"origin":"rudder"`)); got != 3 {
+	if got := bytes.Count(events, []byte(`"origin":"ruddr"`)); got != 3 {
 		t.Fatalf("prompt attempt count = %d, want 3", got)
 	}
-	if got := bytes.Count(events, []byte(`"method":"rudder/prompt/accepted"`)); got != 2 {
+	if got := bytes.Count(events, []byte(`"method":"ruddr/prompt/accepted"`)); got != 2 {
 		t.Fatalf("accepted prompt decision count = %d, want 2", got)
 	}
-	if got := bytes.Count(events, []byte(`"method":"rudder/prompt/rejected"`)); got != 1 {
+	if got := bytes.Count(events, []byte(`"method":"ruddr/prompt/rejected"`)); got != 1 {
 		t.Fatalf("rejected prompt decision count = %d, want 1", got)
 	}
 	if _, err := sendControl(stateDir, controlRequest{Command: "shutdown"}, 2*time.Second); err != nil {
@@ -2201,7 +2201,7 @@ func TestRejectedSecondTurnRestoresIdle(t *testing.T) {
 }
 
 func TestThreadCommandCancellationTerminatesProcessTree(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -2210,10 +2210,10 @@ func TestThreadCommandCancellationTerminatesProcessTree(t *testing.T) {
 	}
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "grandchild.pid")
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
-	t.Setenv("GO_WANT_RUDDER_IGNORE_INITIALIZE", "1")
-	t.Setenv("GO_WANT_RUDDER_GRANDCHILD_PID_FILE", pidFile)
-	t.Setenv("GO_WANT_RUDDER_TERM_IGNORING_GRANDCHILD", "1")
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_IGNORE_INITIALIZE", "1")
+	t.Setenv("GO_WANT_RUDDR_GRANDCHILD_PID_FILE", pidFile)
+	t.Setenv("GO_WANT_RUDDR_TERM_IGNORING_GRANDCHILD", "1")
 	ctx, cancel := context.WithCancel(context.Background())
 	session, err := startAppServerSession(ctx, dir, []string{os.Args[0], "-test.run=TestThreadCommandCancellationTerminatesProcessTree"})
 	if err != nil {
@@ -2263,14 +2263,14 @@ func TestThreadCommandCancellationTerminatesProcessTree(t *testing.T) {
 }
 
 func TestThreadCommandCloseAllowsGracefulEOF(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "eof.marker")
-	t.Setenv("GO_WANT_RUDDER_HELPER", "1")
-	t.Setenv("GO_WANT_RUDDER_EOF_MARKER", marker)
+	t.Setenv("GO_WANT_RUDDR_HELPER", "1")
+	t.Setenv("GO_WANT_RUDDR_EOF_MARKER", marker)
 	session, err := startAppServerSession(context.Background(), dir, []string{os.Args[0], "-test.run=TestThreadCommandCloseAllowsGracefulEOF"})
 	if err != nil {
 		t.Fatal(err)
@@ -2287,11 +2287,11 @@ func TestThreadCommandCloseAllowsGracefulEOF(t *testing.T) {
 }
 
 func TestSecondTurnSteerCarriesCurrentThreadAndTurn(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
-	stateDir, errCh := startIdleHelperRun(t, map[string]string{"GO_WANT_RUDDER_MULTI_TURN_HOLD": "1"}, nil)
+	stateDir, errCh := startIdleHelperRun(t, map[string]string{"GO_WANT_RUDDR_MULTI_TURN_HOLD": "1"}, nil)
 	waitForRunStatus(t, stateDir, "active")
 	if response, err := sendControl(stateDir, controlRequest{Command: "interrupt"}, 5*time.Second); err != nil || !response.OK {
 		t.Fatalf("interrupt response = %#v, err=%v", response, err)
@@ -2331,11 +2331,11 @@ func TestSecondTurnSteerCarriesCurrentThreadAndTurn(t *testing.T) {
 }
 
 func TestPromptRejectedWithoutIdleFlag(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
-	stateDir, errCh := startIdleHelperRun(t, map[string]string{"GO_WANT_RUDDER_MULTI_TURN_HOLD": "1"}, func(cfg *runConfig) {
+	stateDir, errCh := startIdleHelperRun(t, map[string]string{"GO_WANT_RUDDR_MULTI_TURN_HOLD": "1"}, func(cfg *runConfig) {
 		cfg.Idle = false
 	})
 	waitForRunStatus(t, stateDir, "active")
@@ -2353,7 +2353,7 @@ func TestPromptRejectedWithoutIdleFlag(t *testing.T) {
 }
 
 func TestIdleTimeoutExitsWithLastStatus(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -2378,11 +2378,11 @@ func TestIdleTimeoutExitsWithLastStatus(t *testing.T) {
 }
 
 func TestChildExitWhileIdleFailsSession(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
-	stateDir, errCh := startIdleHelperRun(t, map[string]string{"GO_WANT_RUDDER_EXIT_AFTER_TURN": "1"}, nil)
+	stateDir, errCh := startIdleHelperRun(t, map[string]string{"GO_WANT_RUDDR_EXIT_AFTER_TURN": "1"}, nil)
 	select {
 	case err := <-errCh:
 		if err == nil {
@@ -2401,7 +2401,7 @@ func TestChildExitWhileIdleFailsSession(t *testing.T) {
 }
 
 func TestIdleContextCancellationPersistsInterrupted(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
@@ -2422,11 +2422,11 @@ func TestIdleContextCancellationPersistsInterrupted(t *testing.T) {
 }
 
 func TestConcurrentIdlePromptsAcceptOneGeneration(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}
-	stateDir, errCh := startIdleHelperRun(t, map[string]string{"GO_WANT_RUDDER_DELAY_TURN_START": "1"}, nil)
+	stateDir, errCh := startIdleHelperRun(t, map[string]string{"GO_WANT_RUDDR_DELAY_TURN_START": "1"}, nil)
 	waitForRunStatus(t, stateDir, "idle")
 	type result struct {
 		response controlResponse
@@ -2468,7 +2468,7 @@ func TestConcurrentIdlePromptsAcceptOneGeneration(t *testing.T) {
 }
 
 func TestShutdownRejectsLaterPrompt(t *testing.T) {
-	if os.Getenv("GO_WANT_RUDDER_HELPER") == "1" {
+	if os.Getenv("GO_WANT_RUDDR_HELPER") == "1" {
 		runHelperAppServer()
 		os.Exit(0)
 	}

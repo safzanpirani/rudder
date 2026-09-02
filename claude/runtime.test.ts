@@ -3,7 +3,7 @@ import type { Query, SDKMessage, SDKResultMessage } from "@anthropic-ai/claude-a
 import {
   AsyncMessageQueue,
   buildQueryOptions,
-  ClaudeRudderAdapter,
+  ClaudeRuddrAdapter,
   resultStatus,
   userMessage,
   type ProtocolMessage,
@@ -132,7 +132,7 @@ describe("query options", () => {
     );
     expect(sandboxEscape).toEqual({
       behavior: "deny",
-      message: "Rudder denied a request to run Bash outside the workspace sandbox.",
+      message: "Ruddr denied a request to run Bash outside the workspace sandbox.",
     });
 
     const blockedPath = await workspace.canUseTool?.(
@@ -142,7 +142,7 @@ describe("query options", () => {
     );
     expect(blockedPath).toEqual({
       behavior: "deny",
-      message: "Rudder denied Bash access outside the workspace sandbox.",
+      message: "Ruddr denied Bash access outside the workspace sandbox.",
     });
 
     const explicitAskRule = await workspace.canUseTool?.(
@@ -159,15 +159,15 @@ describe("query options", () => {
     );
     expect(explicitAskRule).toEqual({
       behavior: "deny",
-      message: "Rudder cannot override an explicit interactive approval rule.",
+      message: "Ruddr cannot override an explicit interactive approval rule.",
     });
   });
 });
 
-describe("ClaudeRudderAdapter", () => {
+describe("ClaudeRuddrAdapter", () => {
   test("returns JSON-RPC method-not-found for unsupported methods", async () => {
     const emitted: ProtocolMessage[] = [];
-    const adapter = new ClaudeRudderAdapter((message) => {
+    const adapter = new ClaudeRuddrAdapter((message) => {
       emitted.push(message);
     });
     await adapter.handle({ id: "unknown", method: "thread/archive", params: {} });
@@ -190,7 +190,7 @@ describe("ClaudeRudderAdapter", () => {
       prompt = input.prompt;
       return stream.query();
     };
-    const adapter = new ClaudeRudderAdapter((message) => {
+    const adapter = new ClaudeRuddrAdapter((message) => {
       emitted.push(message);
     }, factory);
 
@@ -236,7 +236,7 @@ describe("ClaudeRudderAdapter", () => {
     const emitted: ProtocolMessage[] = [];
     const stream = new FakeSDKStream();
     let prompt: AsyncIterable<ReturnType<typeof userMessage>> | undefined;
-    const adapter = new ClaudeRudderAdapter(
+    const adapter = new ClaudeRuddrAdapter(
       (message) => {
         emitted.push(message);
       },
@@ -270,7 +270,7 @@ describe("multi-turn sessions", () => {
     const emitted: ProtocolMessage[] = [];
     const streams: FakeSDKStream[] = [];
     const capturedOptions: Array<Record<string, unknown>> = [];
-    const adapter = new ClaudeRudderAdapter(
+    const adapter = new ClaudeRuddrAdapter(
       (message) => {
         emitted.push(message);
       },
@@ -319,7 +319,7 @@ describe("multi-turn sessions", () => {
   test("ephemeral sessions refuse a second turn", async () => {
     const emitted: ProtocolMessage[] = [];
     const streams: FakeSDKStream[] = [];
-    const adapter = new ClaudeRudderAdapter(
+    const adapter = new ClaudeRuddrAdapter(
       (message) => {
         emitted.push(message);
       },
@@ -346,7 +346,7 @@ describe("multi-turn sessions", () => {
   test("refuses a new query while the previous stream is still emitting", async () => {
   const emitted: ProtocolMessage[] = [];
   const streams: FakeSDKStream[] = [];
-  const adapter = new ClaudeRudderAdapter(
+  const adapter = new ClaudeRuddrAdapter(
     (message) => {
     emitted.push(message);
     },
@@ -380,7 +380,7 @@ describe("multi-turn sessions", () => {
   test("uses cumulative modelUsage once for queued and error results", async () => {
   const emitted: ProtocolMessage[] = [];
   const stream = new FakeSDKStream();
-  const adapter = new ClaudeRudderAdapter(
+  const adapter = new ClaudeRuddrAdapter(
     (message) => {
     emitted.push(message);
     },

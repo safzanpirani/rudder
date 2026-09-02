@@ -13,7 +13,7 @@ import (
 )
 
 const stateFileName = "state.json"
-const stateClaimFileName = ".rudder.claim"
+const stateClaimFileName = ".ruddr.claim"
 
 // Darwin allows 104 bytes including the trailing NUL; this conservative limit
 // also works on Linux and leaves room for platform bookkeeping.
@@ -83,7 +83,7 @@ func newStateStore(cfg runConfig) (*stateStore, error) {
 	}
 	existing, err := readState(stateDir)
 	if err == nil {
-		return nil, fmt.Errorf("state directory already contains a Rudder run with status %s; use a new --state-dir", existing.Status)
+		return nil, fmt.Errorf("state directory already contains a Ruddr run with status %s; use a new --state-dir", existing.Status)
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read existing state: %w", err)
@@ -96,11 +96,11 @@ func newStateStore(cfg runConfig) (*stateStore, error) {
 		"output.md",
 		"output.md.tmp",
 		"provider.stderr.log",
-		".rudder.sock",
+		".ruddr.sock",
 	} {
 		artifactPath := filepath.Join(stateDir, name)
 		if _, err := os.Lstat(artifactPath); err == nil {
-			return nil, fmt.Errorf("state directory already contains Rudder artifact %s; use a new --state-dir", name)
+			return nil, fmt.Errorf("state directory already contains Ruddr artifact %s; use a new --state-dir", name)
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("inspect state directory artifact %s: %w", name, err)
 		}
@@ -141,7 +141,7 @@ func newStateStore(cfg runConfig) (*stateStore, error) {
 			_ = os.RemoveAll(socketDir)
 		}
 		if errors.Is(err, os.ErrExist) {
-			return nil, errors.New("state directory was claimed by another Rudder run; use a new --state-dir")
+			return nil, errors.New("state directory was claimed by another Ruddr run; use a new --state-dir")
 		}
 		return nil, fmt.Errorf("reserve state directory: %w", err)
 	}
@@ -242,7 +242,7 @@ func readState(stateDir string) (runState, error) {
 }
 
 func controlSocketLocation(stateDir string) (string, string, error) {
-	insideState := filepath.Join(stateDir, ".rudder.sock")
+	insideState := filepath.Join(stateDir, ".ruddr.sock")
 	if len([]byte(insideState)) <= maxControlSocketPathBytes {
 		return insideState, "", nil
 	}
@@ -252,7 +252,7 @@ func controlSocketLocation(stateDir string) (string, string, error) {
 		roots = append(roots, "/tmp")
 	}
 	for _, root := range roots {
-		privateDir, err := os.MkdirTemp(root, "rudder-")
+		privateDir, err := os.MkdirTemp(root, "ruddr-")
 		if err != nil {
 			continue
 		}
@@ -281,7 +281,7 @@ func terminalStatus(status string) bool {
 func displayedState(state runState) runState {
 	if !terminalStatus(state.Status) && !processAlive(state.PID) {
 		state.Status = "stale"
-		state.Error = fmt.Sprintf("Rudder pid %d is not running; persisted state is stale", state.PID)
+		state.Error = fmt.Sprintf("Ruddr pid %d is not running; persisted state is stale", state.PID)
 	}
 	return state
 }

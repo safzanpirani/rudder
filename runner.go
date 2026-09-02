@@ -230,7 +230,7 @@ func validateRunConfig(cfg *runConfig) error {
 	}
 	if cfg.Provider != providerCodex {
 		if cfg.ApprovalPolicy != "never" {
-			return fmt.Errorf("%s runs require --approval-policy never because Rudder has no interactive approval surface", cfg.Provider)
+			return fmt.Errorf("%s runs require --approval-policy never because Ruddr has no interactive approval surface", cfg.Provider)
 		}
 		if cfg.ForkThreadID != "" || cfg.ForkBeforeTurnID != "" || cfg.ForkThroughTurnID != "" {
 			return fmt.Errorf("%s runs do not yet support --fork-thread or fork turn selectors; use --resume-thread", cfg.Provider)
@@ -416,7 +416,7 @@ func (r *controller) startTurn(prompt string, timeout time.Duration) error {
 			Status string `json:"status"`
 		} `json:"turn"`
 	}
-	promptEventID := fmt.Sprintf("rudder-prompt-%d", r.promptEventID.Add(1))
+	promptEventID := fmt.Sprintf("ruddr-prompt-%d", r.promptEventID.Add(1))
 	if err := r.recordPromptAttempt(promptEventID, prompt); err != nil {
 		if rollbackErr := r.rollbackRejectedTurn(turnNumber); rollbackErr != nil {
 			return fmt.Errorf("record prompt attempt: %v; rollback: %w", err, rollbackErr)
@@ -678,8 +678,8 @@ func (r *controller) initializeSession() error {
 	var initialized map[string]any
 	if err := r.call("initialize", map[string]any{
 		"clientInfo": map[string]any{
-			"name":    "rudder",
-			"title":   "Rudder",
+			"name":    "ruddr",
+			"title":   "Ruddr",
 			"version": version,
 		},
 		"capabilities": map[string]any{
@@ -721,7 +721,7 @@ func (r *controller) acquireThread() (string, string, error) {
 	method := "thread/start"
 	mode := "started"
 	baseParams["ephemeral"] = r.cfg.Ephemeral
-	baseParams["serviceName"] = "rudder"
+	baseParams["serviceName"] = "ruddr"
 	if r.cfg.ResumeThreadID != "" {
 		method = "thread/resume"
 		mode = "resumed"
@@ -753,7 +753,7 @@ func (r *controller) acquireThread() (string, string, error) {
 
 func (r *controller) call(method string, params any, target any, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	id := fmt.Sprintf("rudder-%d", r.nextID.Add(1))
+	id := fmt.Sprintf("ruddr-%d", r.nextID.Add(1))
 	responseCh := make(chan rpcEnvelope, 1)
 	r.pendingMu.Lock()
 	r.pending[id] = responseCh
@@ -1026,7 +1026,7 @@ func (r *controller) rejectServerRequest(message rpcEnvelope) {
 		"id": id,
 		"error": map[string]any{
 			"code":    -32601,
-			"message": "Rudder cannot answer this interactive request; run with approvalPolicy=never",
+			"message": "Ruddr cannot answer this interactive request; run with approvalPolicy=never",
 		},
 	})
 }
@@ -1235,7 +1235,7 @@ func (r *controller) recordPromptAttempt(id, text string) error {
 				"id":     id,
 				"type":   "userMessage",
 				"text":   text,
-				"origin": "rudder",
+				"origin": "ruddr",
 				"status": "pending",
 			},
 		},
@@ -1248,7 +1248,7 @@ func (r *controller) recordPromptAttempt(id, text string) error {
 
 func (r *controller) recordPromptDecision(id, decision string) error {
 	raw, err := json.Marshal(map[string]any{
-		"method": "rudder/prompt/" + decision,
+		"method": "ruddr/prompt/" + decision,
 		"params": map[string]any{"promptId": id},
 	})
 	if err != nil {

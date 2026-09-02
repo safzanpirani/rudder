@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
-import { PiRudderAdapter, SubprocessPiClient, type PiClient } from "./runtime";
+import { PiRuddrAdapter, SubprocessPiClient, type PiClient } from "./runtime";
 import type { ProtocolMessage } from "../adapter/protocol";
 
 class FakePiClient implements PiClient {
@@ -32,7 +32,7 @@ class FakePiClient implements PiClient {
 test("Pi adapter steers, reports tools, and completes after agent_settled", async () => {
   const emitted: ProtocolMessage[] = [];
   const client = new FakePiClient();
-  const adapter = new PiRudderAdapter((message) => {
+  const adapter = new PiRuddrAdapter((message) => {
     emitted.push(message);
   }, client);
   await adapter.handle({ id: 1, method: "initialize", params: {} });
@@ -91,7 +91,7 @@ test("Pi waits for an accepted steer and the following settled event", async () 
     if (command.type === "steer") await steerGate;
     return originalSend(command);
   };
-  const adapter = new PiRudderAdapter((message) => {
+  const adapter = new PiRuddrAdapter((message) => {
     emitted.push(message);
   }, client);
   await adapter.handle({ id: 1, method: "initialize", params: {} });
@@ -144,7 +144,7 @@ test("Pi RPC rejects interactive extension UI and times out unanswered commands"
   expect(JSON.stringify(responses)).not.toContain("ui-notify");
 
   await expect(client.send({ type: "never_respond" })).rejects.toThrow("timed out after 500ms");
-  await waitFor(() => events.some((event) => event.type === "rudder_error"));
+  await waitFor(() => events.some((event) => event.type === "ruddr_error"));
   await client.close();
 });
 

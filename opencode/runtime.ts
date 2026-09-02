@@ -50,7 +50,7 @@ export interface OpenCodeSnapshot {
   contextWindow?: number;
 }
 
-export class OpenCodeRudderAdapter extends BaseAdapter {
+export class OpenCodeRuddrAdapter extends BaseAdapter {
   private thread?: OpenCodeThread;
   private turn?: OpenCodeTurn;
   private completionTask?: Promise<void>;
@@ -78,7 +78,7 @@ export class OpenCodeRudderAdapter extends BaseAdapter {
       case "initialize":
         this.initialized = true;
         return {
-          serverInfo: { name: "rudder-opencode2-adapter", version: "1" },
+          serverInfo: { name: "ruddr-opencode2-adapter", version: "1" },
           capabilities: { experimentalApi: true },
         };
       case "initialized":
@@ -339,7 +339,7 @@ export class HTTPBackend implements OpenCodeBackend {
   ) {}
 
   async open(thread: OpenCodeThread, resumed: boolean): Promise<string> {
-    const agent = rudderAgent(thread.sandbox);
+    const agent = ruddrAgent(thread.sandbox);
     await this.startServer(thread.executable, thread.cwd, thread.sandbox);
     if (resumed) {
       // TODO(review): Decide whether resumed OpenCode sessions should override their persisted model.
@@ -431,7 +431,7 @@ export class HTTPBackend implements OpenCodeBackend {
       stderr: "inherit",
       env: {
         ...processEnv(),
-        OPENCODE_CONFIG_CONTENT: rudderConfigContent(sandbox, process.env.OPENCODE_CONFIG_CONTENT),
+        OPENCODE_CONFIG_CONTENT: ruddrConfigContent(sandbox, process.env.OPENCODE_CONFIG_CONTENT),
         OPENCODE_SERVER_PASSWORD: this.password,
       },
     });
@@ -519,18 +519,18 @@ export function validatedLoopbackURL(value: string): string {
   return url.origin;
 }
 
-const RUDDER_AGENTS: Record<string, string> = {
-  "read-only": "rudder-read-only",
-  "workspace-write": "rudder-workspace-write",
-  "danger-full-access": "rudder-danger-full-access",
+const RUDDR_AGENTS: Record<string, string> = {
+  "read-only": "ruddr-read-only",
+  "workspace-write": "ruddr-workspace-write",
+  "danger-full-access": "ruddr-danger-full-access",
 };
 
-function rudderAgent(sandbox?: string): string {
-  return RUDDER_AGENTS[sandbox ?? "workspace-write"] ?? RUDDER_AGENTS["workspace-write"]!;
+function ruddrAgent(sandbox?: string): string {
+  return RUDDR_AGENTS[sandbox ?? "workspace-write"] ?? RUDDR_AGENTS["workspace-write"]!;
 }
 
-export function rudderConfigContent(sandbox?: string, existing?: string): string {
-  // TODO(review): Define how Rudder should isolate inherited OpenCode plugins and agents before changing config precedence.
+export function ruddrConfigContent(sandbox?: string, existing?: string): string {
+  // TODO(review): Define how Ruddr should isolate inherited OpenCode plugins and agents before changing config precedence.
   const configured = existing ? record(JSON.parse(existing), "OPENCODE_CONFIG_CONTENT") : {};
   const agents = isRecord(configured.agents) ? configured.agents : {};
   const readRules = ["read", "glob", "grep", "lsp", "webfetch", "websearch"].map((action) => ({
@@ -540,16 +540,16 @@ export function rudderConfigContent(sandbox?: string, existing?: string): string
   }));
   return JSON.stringify({
     ...configured,
-    default_agent: rudderAgent(sandbox),
+    default_agent: ruddrAgent(sandbox),
     agents: {
       ...agents,
-      "rudder-read-only": {
-        description: "Rudder read-only agent",
+      "ruddr-read-only": {
+        description: "Ruddr read-only agent",
         mode: "primary",
         permissions: [{ action: "*", resource: "*", effect: "deny" }, ...readRules],
       },
-      "rudder-workspace-write": {
-        description: "Rudder workspace-write agent",
+      "ruddr-workspace-write": {
+        description: "Ruddr workspace-write agent",
         mode: "primary",
         permissions: [
           { action: "*", resource: "*", effect: "allow" },
@@ -559,8 +559,8 @@ export function rudderConfigContent(sandbox?: string, existing?: string): string
           { action: "read", resource: "*.env.example", effect: "allow" },
         ],
       },
-      "rudder-danger-full-access": {
-        description: "Rudder unrestricted agent",
+      "ruddr-danger-full-access": {
+        description: "Ruddr unrestricted agent",
         mode: "primary",
         permissions: [{ action: "*", resource: "*", effect: "allow" }],
       },

@@ -23,7 +23,7 @@ func main() {
 	}
 	defer stop()
 	if err := runCLIContext(ctx, os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "rudder:", err)
+		fmt.Fprintln(os.Stderr, "ruddr:", err)
 		os.Exit(1)
 	}
 }
@@ -61,7 +61,7 @@ func runCLIContext(ctx context.Context, args []string) error {
 	case "wait":
 		return waitCommand(args[1:])
 	case "version", "--version", "-version":
-		fmt.Println("rudder", version)
+		fmt.Println("ruddr", version)
 		return nil
 	case "help", "--help", "-h":
 		printUsage()
@@ -131,7 +131,7 @@ func steerCommand(args []string) error {
 	fs := flag.NewFlagSet("steer", flag.ContinueOnError)
 	var stateDir, messageFile, expectedTurnID string
 	var timeout time.Duration
-	fs.StringVar(&stateDir, "state-dir", "", "Rudder run state directory")
+	fs.StringVar(&stateDir, "state-dir", "", "Ruddr run state directory")
 	fs.StringVar(&messageFile, "message-file", "", "read steering text from this file")
 	fs.StringVar(&expectedTurnID, "expected-turn-id", "", "reject the steer if the active turn changed")
 	fs.DurationVar(&timeout, "timeout", 30*time.Second, "control request timeout")
@@ -184,7 +184,7 @@ func promptCommand(args []string) error {
 	fs := flag.NewFlagSet("prompt", flag.ContinueOnError)
 	var stateDir, messageFile string
 	var timeout time.Duration
-	fs.StringVar(&stateDir, "state-dir", "", "Rudder run state directory")
+	fs.StringVar(&stateDir, "state-dir", "", "Ruddr run state directory")
 	fs.StringVar(&messageFile, "message-file", "", "read prompt text from this file")
 	fs.DurationVar(&timeout, "timeout", 60*time.Second, "control request timeout")
 	if err := fs.Parse(args); err != nil {
@@ -232,7 +232,7 @@ func stopCommand(args []string) error {
 	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
 	var stateDir string
 	var timeout time.Duration
-	fs.StringVar(&stateDir, "state-dir", "", "Rudder run state directory")
+	fs.StringVar(&stateDir, "state-dir", "", "Ruddr run state directory")
 	fs.DurationVar(&timeout, "timeout", 30*time.Second, "control request timeout")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -255,7 +255,7 @@ func statusCommand(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	var stateDir string
 	var asJSON bool
-	fs.StringVar(&stateDir, "state-dir", "", "Rudder run state directory")
+	fs.StringVar(&stateDir, "state-dir", "", "Ruddr run state directory")
 	fs.BoolVar(&asJSON, "json", false, "print full state as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -279,7 +279,7 @@ func peekCommand(args []string) error {
 	fs := flag.NewFlagSet("peek", flag.ContinueOnError)
 	var stateDir string
 	var count int
-	fs.StringVar(&stateDir, "state-dir", "", "Rudder run state directory")
+	fs.StringVar(&stateDir, "state-dir", "", "Ruddr run state directory")
 	fs.IntVar(&count, "n", 25, "number of trace lines")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -302,7 +302,7 @@ func interruptCommand(args []string) error {
 	fs := flag.NewFlagSet("interrupt", flag.ContinueOnError)
 	var stateDir string
 	var timeout time.Duration
-	fs.StringVar(&stateDir, "state-dir", "", "Rudder run state directory")
+	fs.StringVar(&stateDir, "state-dir", "", "Ruddr run state directory")
 	fs.DurationVar(&timeout, "timeout", defaultInterruptOperationTimeout+5*time.Second, "control request timeout")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -330,7 +330,7 @@ func waitCommand(args []string) error {
 	fs := flag.NewFlagSet("wait", flag.ContinueOnError)
 	var stateDir string
 	var timeout time.Duration
-	fs.StringVar(&stateDir, "state-dir", "", "Rudder run state directory")
+	fs.StringVar(&stateDir, "state-dir", "", "Ruddr run state directory")
 	fs.DurationVar(&timeout, "timeout", 0, "maximum wait; zero means no limit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -360,7 +360,7 @@ func waitCommand(args []string) error {
 			return fmt.Errorf("turn ended with status %s", state.Status)
 		}
 		if !processAlive(state.PID) {
-			return fmt.Errorf("Rudder pid %d is not running; state is stale at status=%s", state.PID, state.Status)
+			return fmt.Errorf("Ruddr pid %d is not running; state is stale at status=%s", state.PID, state.Status)
 		}
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			return errors.New("wait timed out")
@@ -371,7 +371,7 @@ func waitCommand(args []string) error {
 
 func printUsage() {
 	name := filepath.Base(os.Args[0])
-	fmt.Fprintf(os.Stderr, `Rudder - live steering for coding agents
+	fmt.Fprintf(os.Stderr, `Ruddr - live steering for coding agents
 
 Usage:
   %[1]s run [--provider codex|claude|opencode|pi] --prompt-file FILE --state-dir DIR [options]

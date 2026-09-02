@@ -14,7 +14,7 @@ import {
 } from "./themes";
 
 describe("TUI themes", () => {
-  test("ships the Rudder theme and every built-in OpenCode theme", () => {
+  test("ships the Ruddr theme and every built-in OpenCode theme", () => {
     expect(themes).toHaveLength(34);
     expect(themes[0]?.name).toBe(defaultThemeName);
     expect(findTheme("opencode")?.source).toBe("OpenCode");
@@ -39,7 +39,7 @@ describe("TUI themes", () => {
   });
 
   test("persists a private global preference and tolerates invalid JSON", async () => {
-    const root = await mkdtemp(join(tmpdir(), "rudder-tui-theme-"));
+    const root = await mkdtemp(join(tmpdir(), "ruddr-tui-theme-"));
     const configFile = join(root, "nested", "tui.json");
     await persistTUIConfig({ theme: "nord", diffTreeWidth: 42 }, configFile);
     expect(await readPersistedTheme(configFile)).toBe("nord");
@@ -59,5 +59,20 @@ describe("TUI themes", () => {
     await mkdir(join(root, "invalid"));
     await writeFile(invalidFile, "not json");
     expect(await readPersistedTheme(invalidFile)).toBeUndefined();
+  });
+
+  test("falls back to config written under the previous names", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ruddr-config-"));
+    const current = join(root, "ruddr", "tui.json");
+    const previous = join(root, "rudder", "tui.json");
+    const legacy = join(root, "codex-rudder", "tui.json");
+    await mkdir(join(root, "rudder"), { recursive: true });
+    await writeFile(previous, JSON.stringify({ theme: "nord" }));
+    expect(await readTUIConfig(current, [previous, legacy])).toEqual({ theme: "nord" });
+    await mkdir(join(root, "codex-rudder"), { recursive: true });
+    await writeFile(legacy, JSON.stringify({ theme: "dracula" }));
+    expect(await readTUIConfig(current, [previous, legacy])).toEqual({ theme: "nord" });
+    expect(await readTUIConfig(current, [join(root, "missing.json"), legacy])).toEqual({ theme: "dracula" });
+    expect(await readTUIConfig(current, [])).toEqual({});
   });
 });

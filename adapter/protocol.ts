@@ -24,7 +24,7 @@ export interface RPCNotification {
 
 export type ProtocolMessage = RPCResponse | RPCNotification;
 
-export interface RudderAdapter {
+export interface RuddrAdapter {
   handle(request: RPCRequest): Promise<void>;
   close(): Promise<void>;
 }
@@ -32,7 +32,7 @@ export interface RudderAdapter {
 const MAX_LINE_BYTES = 64 * 1024 * 1024;
 
 export async function runAppServer(
-  adapter: RudderAdapter,
+  adapter: RuddrAdapter,
   emit: (message: ProtocolMessage) => Promise<void>,
 ): Promise<void> {
   try {
@@ -130,7 +130,7 @@ export function errorMessage(error: unknown): string {
 export class InvalidParamsError extends Error {}
 export class MethodNotFoundError extends Error {}
 
-export abstract class BaseAdapter implements RudderAdapter {
+export abstract class BaseAdapter implements RuddrAdapter {
   protected initialized = false;
   protected closed = false;
 

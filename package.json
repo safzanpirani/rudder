@@ -4,7 +4,8 @@
   "description": "Thin control plane for Codex, Claude Code, OpenCode, and Pi agent sessions: run, steer, observe, and a live TUI with diffs.",
   "type": "module",
   "bin": {
-    "rudder": "bin/rudder.cjs"
+    "ruddr": "bin/ruddr.cjs",
+    "rudder": "bin/ruddr.cjs"
   },
   "files": [
     "bin/",
@@ -34,11 +35,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/safzanpirani/rudder.git"
+    "url": "git+https://github.com/safzanpirani/ruddr.git"
   },
-  "homepage": "https://github.com/safzanpirani/rudder#readme",
+  "homepage": "https://github.com/safzanpirani/ruddr#readme",
   "bugs": {
-    "url": "https://github.com/safzanpirani/rudder/issues"
+    "url": "https://github.com/safzanpirani/ruddr/issues"
   },
   "keywords": [
     "codex",

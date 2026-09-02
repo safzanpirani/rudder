@@ -50,23 +50,23 @@ func TestRegisterRunStateDirWritesPrivateReference(t *testing.T) {
 	}
 }
 
-func TestRunningRudderStateDir(t *testing.T) {
+func TestRunningRuddrStateDir(t *testing.T) {
 	tests := []struct {
 		command string
 		want    string
 		ok      bool
 	}{
-		{command: "rudder run --state-dir /tmp/run --model test", want: "/tmp/run", ok: true},
-		{command: `/Users/test/bin/rudder run --state-dir "/tmp/run with spaces"`, want: "/tmp/run with spaces", ok: true},
-		{command: "rudder run --state-dir='/tmp/single quoted'", want: "/tmp/single quoted", ok: true},
-		{command: "other-rudder run --state-dir /tmp/run", ok: false},
-		{command: "rudder status --state-dir /tmp/run", ok: false},
+		{command: "ruddr run --state-dir /tmp/run --model test", want: "/tmp/run", ok: true},
+		{command: `/Users/test/bin/ruddr run --state-dir "/tmp/run with spaces"`, want: "/tmp/run with spaces", ok: true},
+		{command: "ruddr run --state-dir='/tmp/single quoted'", want: "/tmp/single quoted", ok: true},
+		{command: "other-ruddr run --state-dir /tmp/run", ok: false},
+		{command: "ruddr status --state-dir /tmp/run", ok: false},
 	}
 	for _, test := range tests {
 		t.Run(test.command, func(t *testing.T) {
-			got, ok := runningRudderStateDir(test.command)
+			got, ok := runningRuddrStateDir(test.command)
 			if got != test.want || ok != test.ok {
-				t.Fatalf("runningRudderStateDir() = %q, %v; want %q, %v", got, ok, test.want, test.ok)
+				t.Fatalf("runningRuddrStateDir() = %q, %v; want %q, %v", got, ok, test.want, test.ok)
 			}
 		})
 	}

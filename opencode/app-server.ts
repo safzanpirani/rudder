@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { createEmitter, runAppServer } from "../adapter/protocol";
-import { OpenCodeRudderAdapter } from "./runtime";
+import { OpenCodeRuddrAdapter } from "./runtime";
 
 const emit = createEmitter();
-await runAppServer(new OpenCodeRudderAdapter(emit), emit);
+await runAppServer(new OpenCodeRuddrAdapter(emit), emit);

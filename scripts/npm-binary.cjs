@@ -1,4 +1,4 @@
-// Locates or fetches the Rudder binary for this platform. Shared by the npm
+// Locates or fetches the Ruddr binary for this platform. Shared by the npm
 // launcher shim and the postinstall hook. Plain CommonJS so it runs under
 // Node 18+ and Bun without a build step.
 "use strict";
@@ -11,7 +11,7 @@ const path = require("node:path");
 
 const packageRoot = path.resolve(__dirname, "..");
 const manifest = require(path.join(packageRoot, "package.json"));
-const repository = "safzanpirani/rudder";
+const repository = "safzanpirani/ruddr";
 
 function platformTarget() {
   const goos = { darwin: "darwin", linux: "linux", win32: "windows" }[process.platform];
@@ -21,13 +21,13 @@ function platformTarget() {
 }
 
 function assetName(target) {
-  return `rudder-${target.goos}-${target.goarch}${target.extension}`;
+  return `ruddr-${target.goos}-${target.goarch}${target.extension}`;
 }
 
 function binaryPath() {
-  if (process.env.RUDDER_BINARY) return process.env.RUDDER_BINARY;
+  if (process.env.RUDDR_BINARY) return process.env.RUDDR_BINARY;
   const target = platformTarget();
-  return path.join(packageRoot, `rudder${target ? target.extension : ""}`);
+  return path.join(packageRoot, `ruddr${target ? target.extension : ""}`);
 }
 
 function readChecksums() {
@@ -49,7 +49,7 @@ function goAvailable() {
 
 function buildFromSource(destination, log) {
   if (!fs.existsSync(path.join(packageRoot, "go.mod")) || !goAvailable()) return false;
-  log(`rudder: building from source with go into ${destination}`);
+  log(`ruddr: building from source with go into ${destination}`);
   const result = spawnSync("go", ["build", "-trimpath", "-ldflags", "-s -w", "-o", destination, "."], {
     cwd: packageRoot,
     stdio: "inherit",
@@ -58,7 +58,7 @@ function buildFromSource(destination, log) {
 }
 
 async function download(url, destination, log) {
-  log(`rudder: downloading ${url}`);
+  log(`ruddr: downloading ${url}`);
   const response = await fetch(url, { redirect: "follow" });
   if (!response.ok) throw new Error(`download failed: ${response.status} ${response.statusText}`);
   const bytes = Buffer.from(await response.arrayBuffer());
@@ -73,8 +73,8 @@ async function ensureBinary(options = {}) {
   const log = options.log || (() => undefined);
   const destination = binaryPath();
   if (fs.existsSync(destination)) return destination;
-  if (process.env.RUDDER_BINARY)
-    throw new Error(`RUDDER_BINARY points at ${destination}, which does not exist`);
+  if (process.env.RUDDR_BINARY)
+    throw new Error(`RUDDR_BINARY points at ${destination}, which does not exist`);
 
   const target = platformTarget();
   const temporary = `${destination}.${process.pid}.tmp`;
@@ -85,7 +85,7 @@ async function ensureBinary(options = {}) {
     return destination;
   };
 
-  if (target && process.env.RUDDER_SKIP_DOWNLOAD !== "1") {
+  if (target && process.env.RUDDR_SKIP_DOWNLOAD !== "1") {
     const asset = assetName(target);
     const expected = checksums[asset];
     const url = `https://github.com/${repository}/releases/download/v${manifest.version}/${asset}`;
@@ -94,7 +94,7 @@ async function ensureBinary(options = {}) {
       const actual = sha256(temporary);
       if (expected && actual !== expected)
         throw new Error(`checksum mismatch for ${asset}: expected ${expected}, got ${actual}`);
-      if (!expected) log(`rudder: no pinned checksum for ${asset}; accepting download as-is`);
+      if (!expected) log(`ruddr: no pinned checksum for ${asset}; accepting download as-is`);
       return finish();
     } catch (error) {
       try {
@@ -102,7 +102,7 @@ async function ensureBinary(options = {}) {
       } catch {
         // Nothing to clean up.
       }
-      log(`rudder: ${error instanceof Error ? error.message : String(error)}`);
+      log(`ruddr: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -110,9 +110,9 @@ async function ensureBinary(options = {}) {
 
   throw new Error(
     [
-      `rudder: no prebuilt binary is available for ${os.platform()}/${os.arch()} at version ${manifest.version}.`,
-      "Install Go 1.24 or newer and run `rudder` again to build from the bundled sources,",
-      "or set RUDDER_BINARY to a binary built from https://github.com/safzanpirani/rudder.",
+      `ruddr: no prebuilt binary is available for ${os.platform()}/${os.arch()} at version ${manifest.version}.`,
+      "Install Go 1.24 or newer and run `ruddr` again to build from the bundled sources,",
+      "or set RUDDR_BINARY to a binary built from https://github.com/safzanpirani/ruddr.",
     ].join("\n"),
   );
 }

@@ -50,7 +50,7 @@ export interface PiClient {
   close(): Promise<void>;
 }
 
-export class PiRudderAdapter extends BaseAdapter {
+export class PiRuddrAdapter extends BaseAdapter {
   private thread?: PiThread;
   private turn?: PiTurn;
   private tools = new Map<string, Record<string, unknown>>();
@@ -73,7 +73,7 @@ export class PiRudderAdapter extends BaseAdapter {
       case "initialize":
         this.initialized = true;
         return {
-          serverInfo: { name: "rudder-pi-adapter", version: "1" },
+          serverInfo: { name: "ruddr-pi-adapter", version: "1" },
           capabilities: { experimentalApi: true },
         };
       case "initialized":
@@ -210,7 +210,7 @@ export class PiRudderAdapter extends BaseAdapter {
       void this.completeTurn(turn, undefined, undefined, turn.steerGeneration);
       return;
     }
-    if (event.type === "rudder_error") {
+    if (event.type === "ruddr_error") {
       void this.completeTurn(turn, "failed", optionalString(event.error) ?? "Pi RPC process failed");
     }
   }
@@ -401,7 +401,7 @@ export class SubprocessPiClient implements PiClient {
   async send(command: Record<string, unknown>): Promise<Record<string, unknown>> {
     const process = this.process;
     if (!process) throw new Error("Pi RPC process is not running");
-    const id = `rudder-pi-${++this.requestSequence}`;
+    const id = `ruddr-pi-${++this.requestSequence}`;
     const response = new Promise<Record<string, unknown>>((resolve, reject) => {
       const timeout = setTimeout(() => {
         const pending = this.pending.get(id);
@@ -518,7 +518,7 @@ export class SubprocessPiClient implements PiClient {
     this.process = undefined;
     process.kill();
     this.rejectAllPending(error.message);
-    if (!this.closing) this.onEvent?.({ type: "rudder_error", error: error.message });
+    if (!this.closing) this.onEvent?.({ type: "ruddr_error", error: error.message });
   }
 }
 

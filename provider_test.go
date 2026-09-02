@@ -176,7 +176,7 @@ func TestFindClaudeAdapterEntryDoesNotExecuteWorkspaceAdapter(t *testing.T) {
 		t.Fatal(err)
 	}
 	dataHome := t.TempDir()
-	installedEntry := filepath.Join(dataHome, "rudder", "claude", "app-server.ts")
+	installedEntry := filepath.Join(dataHome, "ruddr", "claude", "app-server.ts")
 	if err := os.MkdirAll(filepath.Dir(installedEntry), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -194,5 +194,24 @@ func TestFindClaudeAdapterEntryDoesNotExecuteWorkspaceAdapter(t *testing.T) {
 	}
 	if resolved != installedEntry {
 		t.Fatalf("Claude adapter = %q, want installed entry %q", resolved, installedEntry)
+	}
+}
+
+func TestPreviousEnvironmentNamesKeepWorking(t *testing.T) {
+	if got := previousName("RUDDR_CLAUDE_PATH"); got != "RUDDER_CLAUDE_PATH" {
+		t.Fatalf("previousName = %q, want RUDDER_CLAUDE_PATH", got)
+	}
+	t.Setenv("RUDDR_REGISTRY_DIR", "")
+	t.Setenv("RUDDER_REGISTRY_DIR", "/tmp/old-registry")
+	t.Setenv("CODEX_RUDDER_REGISTRY_DIR", "/tmp/older-registry")
+	if got := getenvAny(registryDirectoryEnvironment, previousRegistryDirectoryEnvironment, legacyRegistryDirectoryEnvironment); got != "/tmp/old-registry" {
+		t.Fatalf("getenvAny = %q, want the RUDDER_ spelling before the CODEX_RUDDER_ one", got)
+	}
+	t.Setenv("RUDDR_REGISTRY_DIR", "/tmp/new-registry")
+	if got := getenvAny(registryDirectoryEnvironment, previousRegistryDirectoryEnvironment); got != "/tmp/new-registry" {
+		t.Fatalf("getenvAny = %q, want the RUDDR_ spelling first", got)
+	}
+	if len(installDirectoryNames) != 3 || installDirectoryNames[0] != "ruddr" || installDirectoryNames[1] != "rudder" {
+		t.Fatalf("installDirectoryNames = %v, want ruddr, rudder, codex-rudder", installDirectoryNames)
 	}
 }

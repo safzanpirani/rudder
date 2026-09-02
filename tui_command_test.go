@@ -49,7 +49,7 @@ func TestFindTUIEntryUsesInstalledDataDirectory(t *testing.T) {
 }
 
 func TestTUIProcessInheritsCallerWorkingDirectory(t *testing.T) {
-	cmd := newTUIProcess("bun", "/installed/tui/index.ts", "/installed/rudder", []string{"--all"})
+	cmd := newTUIProcess("bun", "/installed/tui/index.ts", "/installed/ruddr", []string{"--all"})
 	if cmd.Dir != "" {
 		t.Fatalf("TUI process directory = %q, want inherited caller directory", cmd.Dir)
 	}

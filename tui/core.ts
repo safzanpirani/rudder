@@ -378,7 +378,7 @@ export type Focus = "sessions" | "artifact" | "steer";
 export type TUILayout = "classic" | "beta";
 
 export interface TUIArguments {
-  rudder: string;
+  ruddr: string;
   roots: string[];
   stateDirs: string[];
   interval: number;
@@ -416,17 +416,18 @@ export function parseArguments(
 ): TUIArguments {
   const roots: string[] = [];
   const stateDirs: string[] = [];
-  let rudder = "";
+  let ruddr = "";
   let interval = 500;
   // Every registered run stays listed; --all remains accepted for scripts.
   let includeAll = true;
   let theme: string | undefined;
-  let beta = environment.RUDDER_TUI_BETA === "1";
+  let beta =
+    (environment.RUDDR_TUI_BETA ?? environment.RUDDER_TUI_BETA) === "1";
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index];
     const value = argv[index + 1];
     if (
-      (argument === "--rudder" ||
+      (argument === "--ruddr" ||
         argument === "--root" ||
         argument === "--state-dir" ||
         argument === "--interval" ||
@@ -434,8 +435,8 @@ export function parseArguments(
       !value
     )
       throw new Error(`${argument} requires a value`);
-    if (argument === "--rudder") {
-      rudder = value;
+    if (argument === "--ruddr") {
+      ruddr = value;
       index++;
     } else if (argument === "--root") {
       roots.push(value);
@@ -453,11 +454,11 @@ export function parseArguments(
     else if (argument === "--beta") beta = true;
     else throw new Error(`unknown TUI argument ${argument}`);
   }
-  if (!rudder)
-    throw new Error("--rudder is required (launch the TUI through rudder tui)");
+  if (!ruddr)
+    throw new Error("--ruddr is required (launch the TUI through ruddr tui)");
   if (roots.length === 0 && stateDirs.length === 0)
     roots.push(join(process.cwd(), ".scratch"));
-  return { rudder, roots, stateDirs, interval, includeAll, theme, beta };
+  return { ruddr, roots, stateDirs, interval, includeAll, theme, beta };
 }
 
 function parseInterval(value: string): number {
@@ -713,7 +714,7 @@ export async function discoverSessions(
           const alive = options.processAlive ?? defaultProcessAlive;
           if (!isTerminalStatus(parsed.status) && !alive(parsed.pid)) {
             parsed.status = "stale";
-            parsed.error = `Rudder pid ${parsed.pid} is not running; persisted state is stale`;
+            parsed.error = `Ruddr pid ${parsed.pid} is not running; persisted state is stale`;
           }
           return { ...parsed, stateFile } satisfies Session;
         } catch {
@@ -748,13 +749,16 @@ async function readRegisteredStateDirs(registryDir: string): Promise<string[]> {
 }
 
 function defaultRegistryDirectories(): string[] {
-  if (process.env.RUDDER_REGISTRY_DIR)
-    return [resolve(process.env.RUDDER_REGISTRY_DIR)];
-  if (process.env.CODEX_RUDDER_REGISTRY_DIR)
-    return [resolve(process.env.CODEX_RUDDER_REGISTRY_DIR)];
+  const configured =
+    process.env.RUDDR_REGISTRY_DIR ||
+    process.env.RUDDER_REGISTRY_DIR ||
+    process.env.CODEX_RUDDER_REGISTRY_DIR;
+  if (configured) return [resolve(configured)];
   const stateHome =
     process.env.XDG_STATE_HOME || join(homedir(), ".local", "state");
+  // Registries written before the rename stay visible.
   return [
+    join(stateHome, "ruddr", "runs"),
     join(stateHome, "rudder", "runs"),
     join(stateHome, "codex-rudder", "runs"),
   ];
@@ -1162,7 +1166,7 @@ export function parseChatTranscript(
         };
       };
       if (
-        event.method === "rudder/prompt/rejected" &&
+        event.method === "ruddr/prompt/rejected" &&
         event.params?.promptId
       ) {
         rejectedPromptIds.add(event.params.promptId);
@@ -1170,7 +1174,7 @@ export function parseChatTranscript(
       }
       const item = event.params?.item;
       const threadId = event.params?.threadId;
-      if (item?.type === "userMessage" && item.origin === "rudder" && threadId)
+      if (item?.type === "userMessage" && item.origin === "ruddr" && threadId)
         rootThreads.add(threadId);
       if (!item?.type || !event.method?.startsWith("item/")) continue;
       // Sub-agent items carry a different threadId; keep the root conversation.
@@ -1475,7 +1479,7 @@ export interface ModelInfo {
   note?: string;
 }
 
-// Embedded fallback for older rudder binaries without `rudder models`.
+// Embedded fallback for older ruddr binaries without `ruddr models`.
 export const FALLBACK_MODELS: ModelInfo[] = [
   { provider: "codex", id: "gpt-5.6-sol", label: "GPT-5.6-Sol", default: true, available: true },
   { provider: "codex", id: "gpt-5.6-terra", label: "GPT-5.6-Terra", available: true },
@@ -1570,7 +1574,7 @@ export interface DejaHit {
 }
 
 // deja find --json hits carry a `resume` command like "codex resume <id>" or
-// "claude --resume <id>"; the id doubles as rudder's --resume-thread value.
+// "claude --resume <id>"; the id doubles as ruddr's --resume-thread value.
 export function parseDejaHits(json: string): DejaHit[] {
   let parsed: unknown;
   try {
@@ -1603,7 +1607,7 @@ export function parseDejaHits(json: string): DejaHit[] {
 
 export function sessionDetails(session: Session | undefined): string {
   if (!session) {
-    return `No active Rudder sessions.\n\nWatching the global registry and ${join(process.cwd(), ".scratch")}.\nNew runs appear automatically.`;
+    return `No active Ruddr sessions.\n\nWatching the global registry and ${join(process.cwd(), ".scratch")}.\nNew runs appear automatically.`;
   }
   const elapsed = formatElapsed(session.startedAt, session.completedAt);
   return [
