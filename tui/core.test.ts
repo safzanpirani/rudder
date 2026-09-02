@@ -39,6 +39,7 @@ import {
   statusGlyphForKind,
   statusTimeoutMs,
   visibleGitDiffLineIndices,
+  clampScrollOffset,
   contextMeter,
   diffTreeWidthForRatio,
   filetypeForFence,
@@ -596,6 +597,14 @@ describe("artifact and display helpers", () => {
     expect(typewriterReveal(0, 100, 24)).toBe(24);
     expect(typewriterReveal(90, 100, 24)).toBe(100);
     expect(typewriterReveal(120, 100)).toBe(100);
+  });
+
+  test("clamps wheel scrolling of a list to its content", () => {
+    expect(clampScrollOffset(-3, 10, 4)).toBe(0);
+    expect(clampScrollOffset(2, 10, 4)).toBe(2);
+    expect(clampScrollOffset(9, 10, 4)).toBe(6);
+    expect(clampScrollOffset(5, 3, 4)).toBe(0);
+    expect(clampScrollOffset(1.6, 10, 4)).toBe(2);
   });
 
   test("clamps the draggable diff tree width", () => {

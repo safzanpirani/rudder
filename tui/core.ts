@@ -2150,3 +2150,13 @@ export function typewriterReveal(
   if (revealed >= targetLength) return targetLength;
   return Math.min(targetLength, revealed + step);
 }
+
+/** Clamps a list scroll offset so the viewport never runs past the end. */
+export function clampScrollOffset(
+  offset: number,
+  itemCount: number,
+  visibleItems: number,
+): number {
+  const maximum = Math.max(0, itemCount - Math.max(1, visibleItems));
+  return Math.max(0, Math.min(maximum, Math.round(offset)));
+}

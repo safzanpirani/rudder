@@ -25,6 +25,7 @@ import {
   AsyncTaskGate,
   attachToolDetails,
   blendHex,
+  clampScrollOffset,
   contextMeter,
   diffTreeWidthForRatio,
   filetypeForPath,
@@ -389,14 +390,7 @@ async function main(): Promise<void> {
           1,
           Math.floor(this.height / linesPerItem),
         );
-        const selectedIndex = this.getSelectedIndex();
-        const scrollOffset = Math.max(
-          0,
-          Math.min(
-            selectedIndex - Math.floor(visibleItems / 2),
-            Math.max(0, sessions.length - visibleItems),
-          ),
-        );
+        const scrollOffset = listScrollOffset(this);
         const accent = parseColor(palette.accent);
         const success = parseColor(palette.success);
         const warning = parseColor(palette.warning);
@@ -584,14 +578,7 @@ async function main(): Promise<void> {
       renderAfter(buffer) {
         const options = this.options;
         const visibleItems = Math.max(1, Math.floor(this.height));
-        const selectedIndex = this.getSelectedIndex();
-        const scrollOffset = Math.max(
-          0,
-          Math.min(
-            selectedIndex - Math.floor(visibleItems / 2),
-            Math.max(0, options.length - visibleItems),
-          ),
-        );
+        const scrollOffset = listScrollOffset(this);
         const addition = parseColor(palette.success);
         const deletion = parseColor(palette.danger);
         const labelX = 3;
@@ -1046,27 +1033,21 @@ async function main(): Promise<void> {
       if (paletteOpen) runPaletteSelection();
     });
     dejaPanel.onMouseDown = () => dejaPicker.focus();
+    let sessionScrollOffset: number | undefined;
     sessionList.onMouseScroll = (event) => {
-      focusSessions();
       const steps = Math.max(1, Math.round(event.scroll?.delta ?? 1));
-      if (event.scroll?.direction === "up") sessionList.moveUp(steps);
-      else if (event.scroll?.direction === "down") sessionList.moveDown(steps);
+      const direction =
+        event.scroll?.direction === "up" ? -1 : event.scroll?.direction === "down" ? 1 : 0;
+      if (direction === 0) return;
+      sessionScrollOffset = scrollListBy(sessionList, direction * steps, 2);
     };
+    sessionList.on(SelectRenderableEvents.SELECTION_CHANGED, () => {
+      sessionScrollOffset = undefined;
+    });
     sessionList.onMouseDown = (event) => {
       focusSessions();
       const linesPerItem = 2;
-      const visibleItems = Math.max(
-        1,
-        Math.floor(sessionList.height / linesPerItem),
-      );
-      const selectedIndex = sessionList.getSelectedIndex();
-      const scrollOffset = Math.max(
-        0,
-        Math.min(
-          selectedIndex - Math.floor(visibleItems / 2),
-          Math.max(0, sessions.length - visibleItems),
-        ),
-      );
+      const scrollOffset = listScrollOffset(sessionList);
       const clickedIndex =
         scrollOffset + Math.floor((event.y - sessionList.y) / linesPerItem);
       if (clickedIndex >= 0 && clickedIndex < sessions.length)
@@ -1078,10 +1059,10 @@ async function main(): Promise<void> {
       setTimeout(updateFollowFromPosition, 0);
     };
     diffFileList.onMouseScroll = (event) => {
-      diffFileList.focus();
       const steps = Math.max(1, Math.round(event.scroll?.delta ?? 1));
-      if (event.scroll?.direction === "up") diffFileList.moveUp(steps);
-      else if (event.scroll?.direction === "down") diffFileList.moveDown(steps);
+      const direction =
+        event.scroll?.direction === "up" ? -1 : event.scroll?.direction === "down" ? 1 : 0;
+      if (direction !== 0) scrollListBy(diffFileList, direction * steps, 1);
     };
     diffDivider.onMouseOver = () => {
       diffDividerHovered = true;
@@ -1131,15 +1112,7 @@ async function main(): Promise<void> {
     diffFileList.onMouseDown = (event) => {
       diffFileList.focus();
       const options = diffFileList.options;
-      const visibleItems = Math.max(1, Math.floor(diffFileList.height));
-      const selectedIndex = diffFileList.getSelectedIndex();
-      const scrollOffset = Math.max(
-        0,
-        Math.min(
-          selectedIndex - Math.floor(visibleItems / 2),
-          Math.max(0, options.length - visibleItems),
-        ),
-      );
+      const scrollOffset = listScrollOffset(diffFileList);
       const clickedIndex =
         scrollOffset + Math.floor(event.y - diffFileList.y);
       if (clickedIndex >= 0 && clickedIndex < options.length) {
@@ -2416,9 +2389,17 @@ async function main(): Promise<void> {
         (session) => session.stateDir === selectedStateDir,
       );
       if (selectedIndex >= 0) {
+        const keep = sessionScrollOffset;
         sessionList.setSelectedIndex(selectedIndex);
         view = reduceView(view, { type: "select", stateDir: selectedStateDir });
+        sessionScrollOffset = keep;
       }
+      if (sessionScrollOffset !== undefined)
+        sessionScrollOffset = scrollListBy(
+          sessionList,
+          sessionScrollOffset - listScrollOffset(sessionList),
+          2,
+        );
       const liveCount = sessions.filter(isLive).length;
       const historyCount = sessions.length - liveCount;
       sessionsPanel.title = sessionsPanelTitle({
@@ -3445,6 +3426,33 @@ function codeChunks(
     chunks.push(...t`${chunk}`.chunks);
   }
   return chunks;
+}
+
+// SelectRenderable only scrolls to follow its selection; wheel scrolling has
+// to move the viewport without touching the selected item, so read and write
+// its offset directly. The list re-centers on the next selection change.
+interface ScrollableList {
+  scrollOffset: number;
+}
+
+function listScrollOffset(list: SelectRenderable): number {
+  return (list as unknown as ScrollableList).scrollOffset ?? 0;
+}
+
+function scrollListBy(
+  list: SelectRenderable,
+  delta: number,
+  linesPerItem: number,
+): number {
+  const visible = Math.max(1, Math.floor(list.height / linesPerItem));
+  const next = clampScrollOffset(
+    listScrollOffset(list) + delta,
+    list.options.length,
+    visible,
+  );
+  (list as unknown as ScrollableList).scrollOffset = next;
+  list.requestRender();
+  return next;
 }
 
 function renderSessionDetails(
