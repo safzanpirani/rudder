@@ -93,6 +93,110 @@ export type GitDiffLineKind =
 export interface GitDiffLine {
   kind: GitDiffLineKind;
   text: string;
+  /** Path of the file this line belongs to (from the `diff --git` header). */
+  path?: string;
+  /** Pre-image line number for context and deletion lines. */
+  oldLine?: number;
+  /** Post-image line number for context and addition lines. */
+  newLine?: number;
+}
+
+export interface GitDiffSummary {
+  files: number;
+  additions: number;
+  deletions: number;
+}
+
+export interface GitDiffHunkHeader {
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
+  context: string;
+}
+
+export function parseGitDiffHunkHeader(
+  text: string,
+): GitDiffHunkHeader | undefined {
+  const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/.exec(text);
+  if (!match) return;
+  return {
+    oldStart: Number(match[1]),
+    oldCount: match[2] === undefined ? 1 : Number(match[2]),
+    newStart: Number(match[3]),
+    newCount: match[4] === undefined ? 1 : Number(match[4]),
+    context: match[5] ?? "",
+  };
+}
+
+export function gitDiffFilePath(headerText: string): string {
+  const match = /^diff --git (?:"?a\/)(.+?)"? (?:"?b\/)(.+?)"?$/.exec(headerText);
+  return match?.[2] ?? headerText.replace(/^diff --git /, "");
+}
+
+export function gitDiffSummary(lines: readonly GitDiffLine[]): GitDiffSummary {
+  let files = 0;
+  let additions = 0;
+  let deletions = 0;
+  for (const line of lines) {
+    if (line.kind === "file") files++;
+    else if (line.kind === "addition") additions++;
+    else if (line.kind === "deletion") deletions++;
+  }
+  return { files, additions, deletions };
+}
+
+/**
+ * Row indices that stay visible when some files are folded. File headers are
+ * always visible so a folded file can be unfolded again.
+ */
+export function visibleGitDiffLineIndices(
+  lines: readonly GitDiffLine[],
+  collapsedFiles: ReadonlySet<string>,
+): number[] {
+  const visible: number[] = [];
+  for (const [index, line] of lines.entries()) {
+    if (line.kind === "file" || !line.path || !collapsedFiles.has(line.path))
+      visible.push(index);
+  }
+  return visible;
+}
+
+export interface GitDiffFileStats {
+  additions: number;
+  deletions: number;
+  status: "M" | "A" | "D" | "R";
+}
+
+export function gitDiffFileStats(
+  lines: readonly GitDiffLine[],
+): Map<string, GitDiffFileStats> {
+  const stats = new Map<string, GitDiffFileStats>();
+  let current: GitDiffFileStats | undefined;
+  for (const line of lines) {
+    if (line.kind === "file") {
+      current = { additions: 0, deletions: 0, status: "M" };
+      stats.set(line.path ?? gitDiffFilePath(line.text), current);
+    } else if (!current) continue;
+    else if (line.text.startsWith("new file mode ")) current.status = "A";
+    else if (line.text.startsWith("deleted file mode ")) current.status = "D";
+    else if (line.text.startsWith("rename from ")) current.status = "R";
+    else if (line.kind === "addition") current.additions++;
+    else if (line.kind === "deletion") current.deletions++;
+  }
+  return stats;
+}
+
+/** Width of a line-number gutter wide enough for every number in the diff. */
+export function gitDiffGutterWidth(lines: readonly GitDiffLine[]): number {
+  let largest = 0;
+  for (const line of lines) {
+    if (line.oldLine !== undefined && line.oldLine > largest)
+      largest = line.oldLine;
+    if (line.newLine !== undefined && line.newLine > largest)
+      largest = line.newLine;
+  }
+  return Math.max(2, String(largest).length);
 }
 
 export interface GitDiffTreeEntry {
@@ -101,6 +205,7 @@ export interface GitDiffTreeEntry {
   kind: "directory" | "file";
   path: string;
   expanded?: boolean;
+  collapsed?: boolean;
   status?: "M" | "A" | "D" | "R";
 }
 
@@ -116,15 +221,39 @@ export function diffTreeWidthForPointer(
 
 export function parseGitDiff(content: string): GitDiffLine[] {
   if (!content) return [];
+  let path: string | undefined;
+  let oldLine = 0;
+  let newLine = 0;
+  let inHunk = false;
   return content.replace(/\n$/, "").split("\n").map((text) => {
     let kind: GitDiffLineKind = "context";
-    if (text.startsWith("diff --git ")) kind = "file";
-    else if (text.startsWith("@@")) kind = "hunk";
-    else if (text.startsWith("+") && !text.startsWith("+++"))
+    if (text.startsWith("diff --git ")) {
+      kind = "file";
+      path = gitDiffFilePath(text);
+      inHunk = false;
+      return { kind, text, path };
+    }
+    if (text.startsWith("@@")) {
+      kind = "hunk";
+      const header = parseGitDiffHunkHeader(text);
+      inHunk = Boolean(header);
+      oldLine = header?.oldStart ?? 0;
+      newLine = header?.newStart ?? 0;
+      return { kind, text, path };
+    }
+    if (text.startsWith("+") && !text.startsWith("+++")) {
       kind = "addition";
-    else if (text.startsWith("-") && !text.startsWith("---"))
+      const line: GitDiffLine = { kind, text, path };
+      if (inHunk) line.newLine = newLine++;
+      return line;
+    }
+    if (text.startsWith("-") && !text.startsWith("---")) {
       kind = "deletion";
-    else if (
+      const line: GitDiffLine = { kind, text, path };
+      if (inHunk) line.oldLine = oldLine++;
+      return line;
+    }
+    if (
       text.startsWith("index ") ||
       text.startsWith("---") ||
       text.startsWith("+++") ||
@@ -135,9 +264,16 @@ export function parseGitDiff(content: string): GitDiffLine[] {
       text.startsWith("rename to ") ||
       text.startsWith("Binary files ") ||
       text === "\\ No newline at end of file"
-    )
+    ) {
       kind = "metadata";
-    return { kind, text };
+      return { kind, text, path };
+    }
+    const line: GitDiffLine = { kind, text, path };
+    if (inHunk) {
+      line.oldLine = oldLine++;
+      line.newLine = newLine++;
+    }
+    return line;
   });
 }
 
@@ -162,6 +298,7 @@ export function nextGitDiffBoundary(
 export function gitDiffTree(
   lines: GitDiffLine[],
   collapsedDirectories: ReadonlySet<string> = new Set(),
+  collapsedFiles: ReadonlySet<string> = new Set(),
 ): GitDiffTreeEntry[] {
   const files: Array<{
     path: string;
@@ -173,10 +310,7 @@ export function gitDiffTree(
   let current: (typeof files)[number] | undefined;
   for (const [rowIndex, line] of lines.entries()) {
     if (line.kind === "file") {
-      const match = /^diff --git (?:"?a\/)(.+?)"? (?:"?b\/)(.+?)"?$/.exec(
-        line.text,
-      );
-      const path = match?.[2] ?? line.text.replace(/^diff --git /, "");
+      const path = line.path ?? gitDiffFilePath(line.text);
       current = { path, rowIndex, additions: 0, deletions: 0, status: "M" };
       files.push(current);
     } else if (current && line.text.startsWith("new file mode "))
@@ -221,6 +355,7 @@ export function gitDiffTree(
       kind: "file",
       path: file.path,
       status: file.status,
+      ...(collapsedFiles.has(file.path) ? { collapsed: true } : {}),
     });
   }
   return entries;
@@ -381,6 +516,7 @@ export function contextualHelp(options: {
   hasQuery: boolean;
   dejaAvailable?: boolean;
   compact?: boolean;
+  artifact?: Artifact;
 }): string {
   if (options.focus === "sessions") {
     return options.layout === "classic"
@@ -392,11 +528,97 @@ export function contextualHelp(options: {
     options.session?.status === "active" || options.session?.status === "idle";
   const tab = options.layout === "classic" ? "Tab focus" : "Tab sessions";
   const stop = stoppable ? " · x x" : "";
+  if (options.artifact === "diff") {
+    const fold = options.compact ? "Enter fold" : "Enter fold file";
+    return options.compact
+      ? `]c hunk · ]f file · ${fold} · s prompt${stop} · ${tab} · q quit`
+      : `]c ]f next hunk/file · [c [f previous · ${fold} · s prompt${matches}${stop ? " · x x stop" : ""} · ${tab} · q quit`;
+  }
   if (options.compact)
     return `s prompt · n new · o tabs${matches}${stop} · ${tab} · q quit`;
   const find = options.dejaAvailable ? " · f find" : "";
   const action = stoppable ? " · x x stop" : "";
   return `s prompt · n new · m model${find}${matches}${action} · ${tab} · q quit`;
+}
+
+export interface HelpSegment {
+  key: string;
+  label: string;
+}
+
+/**
+ * Splits "s prompt · x x stop · Tab focus" into key/label pairs so the footer
+ * can color the key and dim the label. Repeated single-character keys such as
+ * "x x" and paired keys such as "]c ]f" stay together as the key.
+ */
+export function helpSegments(help: string): HelpSegment[] {
+  return help
+    .split(" · ")
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .map((segment) => {
+      const words = segment.split(" ");
+      let keyWords = 1;
+      if (
+        words.length > 2 &&
+        (words[0] === words[1] ||
+          (/^[\[\]]\w$/.test(words[0]) && /^[\[\]]\w$/.test(words[1])))
+      )
+        keyWords = 2;
+      return {
+        key: words.slice(0, keyWords).join(" "),
+        label: words.slice(keyWords).join(" "),
+      };
+    });
+}
+
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+export function spinnerFrame(tick: number): string {
+  return SPINNER_FRAMES[((tick % SPINNER_FRAMES.length) + SPINNER_FRAMES.length) % SPINNER_FRAMES.length];
+}
+
+/** Mixes `tint` into `base`; `amount` 0 returns base, 1 returns tint. */
+export function blendHex(base: string, tint: string, amount: number): string {
+  const parse = (value: string): [number, number, number] => {
+    const hex = value.replace("#", "").slice(0, 6);
+    const full =
+      hex.length === 3
+        ? hex.split("").map((char) => char + char).join("")
+        : hex.padEnd(6, "0");
+    return [
+      parseInt(full.slice(0, 2), 16),
+      parseInt(full.slice(2, 4), 16),
+      parseInt(full.slice(4, 6), 16),
+    ];
+  };
+  const ratio = Math.max(0, Math.min(1, amount));
+  const from = parse(base);
+  const to = parse(tint);
+  const channel = (index: number) =>
+    Math.round(from[index] + (to[index] - from[index]) * ratio)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${channel(0)}${channel(1)}${channel(2)}`;
+}
+
+export type StatusKind = "info" | "success" | "warning" | "error";
+
+export function statusGlyphForKind(kind: StatusKind): string {
+  switch (kind) {
+    case "success":
+      return "✓";
+    case "warning":
+      return "!";
+    case "error":
+      return "×";
+    default:
+      return "›";
+  }
+}
+
+export function statusTimeoutMs(kind: StatusKind): number {
+  return kind === "error" || kind === "warning" ? 12_000 : 6_000;
 }
 
 export class AsyncTaskGate {
@@ -1434,7 +1656,7 @@ function formatAge(value: string | undefined, now = Date.now()): string {
   return `${Math.floor(seconds / 86400)}d ago`;
 }
 
-function formatElapsed(
+export function formatElapsed(
   startValue: string | undefined,
   endValue: string | undefined,
   now = Date.now(),

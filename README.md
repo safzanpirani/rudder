@@ -332,15 +332,23 @@ selected session's tracked staged and unstaged working-tree changes against
 tree with per-file line counts; selecting a file jumps to its patch. Drag the
 divider beside the tree to reveal long paths or give the patch more room; Rudder
 remembers that width across launches. File status letters distinguish modified,
-added, deleted, and renamed paths. Use `]c` and `[c` to move between hunks, or
-`]f` and `[f` to move between files. Both panes support
+added, deleted, and renamed paths. The patch shows old and new line numbers in
+a gutter, tints added and deleted lines, and renders each file as a banner with
+its status and line counts. Use `]c` and `[c` to move between hunks, or
+`]f` and `[f` to move between files. Enter, Space, or `z` folds and unfolds the
+file under the cursor (clicking a file banner does the same), and `Z` folds or
+unfolds every file. The Diff tab label carries the current `+added −deleted`
+totals. Both panes support
 mouse-wheel scrolling, `/` search with `n`/`N` match navigation, and `c` to copy
 the selected row. In Activity, clicking selects a row and clicking a tool row
 expands it; use the Output tab for normal mouse text selection. Enter also
 expands Activity tool rows to show the full command, status, duration, working
 directory, and captured output. Scrolling up
 pauses follow mode; click the follow indicator or press End to return to live
-output. Classic mode shows compact session metadata by default. Press `i` to
+output. While the selected session works, a spinner and elapsed time show in
+the tab bar, the sessions list, and the bottom of Chat and Activity. Status
+messages lead with a `✓`, `›`, `!`, or `×` glyph and clear themselves after a
+few seconds. Classic mode shows compact session metadata by default. Press `i` to
 cycle through expanded, hidden, and compact metadata. Beta mode starts with
 metadata hidden and uses the same cycle.
 

@@ -29,6 +29,16 @@ import {
   visibleSessions,
   formatTokenUsage,
   gitDiffTree,
+  gitDiffFileStats,
+  gitDiffGutterWidth,
+  gitDiffSummary,
+  helpSegments,
+  blendHex,
+  parseGitDiffHunkHeader,
+  spinnerFrame,
+  statusGlyphForKind,
+  statusTimeoutMs,
+  visibleGitDiffLineIndices,
   promptModeForSession,
   promptTargetForSession,
   resolvePromptTarget,
@@ -340,6 +350,119 @@ describe("artifact and display helpers", () => {
     expect(nextGitDiffBoundary(lines, 8, "hunk", 1)).toBe(1);
     expect(nextGitDiffBoundary(lines, 4, "file", -1)).toBe(0);
     expect(nextGitDiffBoundary(lines, 0, "file", -1)).toBe(7);
+  });
+
+  test("numbers diff lines from hunk headers and tags them with their file", () => {
+    const lines = parseGitDiff(
+      [
+        "diff --git a/src/a.ts b/src/a.ts",
+        "index 1..2 100644",
+        "--- a/src/a.ts",
+        "+++ b/src/a.ts",
+        "@@ -10,3 +12,4 @@ function main() {",
+        " keep",
+        "-old",
+        "+new",
+        "+next",
+        " tail",
+        "diff --git a/b.ts b/b.ts",
+        "@@ -1 +1 @@",
+        "-x",
+        "+y",
+      ].join("\n"),
+    );
+    expect(lines.map((line) => [line.path, line.oldLine, line.newLine])).toEqual([
+      ["src/a.ts", undefined, undefined],
+      ["src/a.ts", undefined, undefined],
+      ["src/a.ts", undefined, undefined],
+      ["src/a.ts", undefined, undefined],
+      ["src/a.ts", undefined, undefined],
+      ["src/a.ts", 10, 12],
+      ["src/a.ts", 11, undefined],
+      ["src/a.ts", undefined, 13],
+      ["src/a.ts", undefined, 14],
+      ["src/a.ts", 12, 15],
+      ["b.ts", undefined, undefined],
+      ["b.ts", undefined, undefined],
+      ["b.ts", 1, undefined],
+      ["b.ts", undefined, 1],
+    ]);
+    expect(parseGitDiffHunkHeader("@@ -10,3 +12,4 @@ function main() {")).toEqual({
+      oldStart: 10,
+      oldCount: 3,
+      newStart: 12,
+      newCount: 4,
+      context: "function main() {",
+    });
+    expect(parseGitDiffHunkHeader("@@ -1 +1 @@")?.newCount).toBe(1);
+    expect(parseGitDiffHunkHeader("not a hunk")).toBeUndefined();
+    expect(gitDiffSummary(lines)).toEqual({ files: 2, additions: 3, deletions: 2 });
+    expect(gitDiffGutterWidth(lines)).toBe(2);
+    expect(gitDiffGutterWidth([])).toBe(2);
+    expect(gitDiffGutterWidth(parseGitDiff("diff --git a/x b/x\n@@ -1200 +1 @@\n-x"))).toBe(4);
+    expect([...gitDiffFileStats(lines).entries()]).toEqual([
+      ["src/a.ts", { additions: 2, deletions: 1, status: "M" }],
+      ["b.ts", { additions: 1, deletions: 1, status: "M" }],
+    ]);
+  });
+
+  test("keeps file headers visible while folded file bodies are hidden", () => {
+    const lines = parseGitDiff(
+      "diff --git a/a.ts b/a.ts\n@@ -1 +1 @@\n-old\n+new\n" +
+        "diff --git a/b.ts b/b.ts\n@@ -1 +1 @@\n-x\n+y",
+    );
+    expect(visibleGitDiffLineIndices(lines, new Set())).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(visibleGitDiffLineIndices(lines, new Set(["a.ts"]))).toEqual([0, 4, 5, 6, 7]);
+    expect(visibleGitDiffLineIndices(lines, new Set(["a.ts", "b.ts"]))).toEqual([0, 4]);
+    const tree = gitDiffTree(lines, new Set(), new Set(["b.ts"]));
+    expect(tree.map((entry) => [entry.path, entry.collapsed])).toEqual([
+      ["a.ts", undefined],
+      ["b.ts", true],
+    ]);
+  });
+
+  test("splits footer help into key and label segments", () => {
+    expect(helpSegments("s prompt · x x stop · Tab focus · q quit")).toEqual([
+      { key: "s", label: "prompt" },
+      { key: "x x", label: "stop" },
+      { key: "Tab", label: "focus" },
+      { key: "q", label: "quit" },
+    ]);
+    expect(helpSegments("]c ]f next hunk/file · [c [f previous · Enter fold file")).toEqual([
+      { key: "]c ]f", label: "next hunk/file" },
+      { key: "[c [f", label: "previous" },
+      { key: "Enter", label: "fold file" },
+    ]);
+    expect(helpSegments("j/k select")).toEqual([{ key: "j/k", label: "select" }]);
+    expect(helpSegments("")).toEqual([]);
+  });
+
+  test("offers diff navigation help only while the diff pane is focused", () => {
+    const base = { layout: "classic" as const, focus: "artifact" as const, hasQuery: false };
+    expect(contextualHelp({ ...base, artifact: "diff" })).toContain("]c ]f next hunk/file");
+    expect(contextualHelp({ ...base, artifact: "diff", compact: true })).toBe(
+      "]c hunk · ]f file · Enter fold · s prompt · Tab focus · q quit",
+    );
+    expect(contextualHelp({ ...base, artifact: "chat" })).not.toContain("fold");
+    expect(
+      contextualHelp({ ...base, artifact: "diff", session: { status: "active" } }),
+    ).toContain("x x stop");
+  });
+
+  test("animates and colors status chrome deterministically", () => {
+    expect(spinnerFrame(0)).toBe("⠋");
+    expect(spinnerFrame(10)).toBe("⠋");
+    expect(spinnerFrame(3)).toBe(spinnerFrame(13));
+    expect(spinnerFrame(-1)).toBe("⠏");
+    expect(blendHex("#000000", "#ffffff", 0.5)).toBe("#808080");
+    expect(blendHex("#101318", "#7bd88f", 0)).toBe("#101318");
+    expect(blendHex("#101318", "#7bd88f", 1)).toBe("#7bd88f");
+    expect(blendHex("#fff", "#000", 2)).toBe("#000000");
+    expect(statusGlyphForKind("success")).toBe("✓");
+    expect(statusGlyphForKind("error")).toBe("×");
+    expect(statusGlyphForKind("warning")).toBe("!");
+    expect(statusGlyphForKind("info")).toBe("›");
+    expect(statusTimeoutMs("error")).toBeGreaterThan(statusTimeoutMs("success"));
   });
 
   test("clamps the draggable diff tree width", () => {

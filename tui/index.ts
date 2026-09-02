@@ -1,4 +1,5 @@
 import {
+  bg,
   BoxRenderable,
   bold,
   createCliRenderer,
@@ -12,8 +13,8 @@ import {
   SelectRenderableEvents,
   StyledText,
   t,
-  TextAttributes,
   TextRenderable,
+  underline,
 } from "@opentui/core";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -22,6 +23,17 @@ import {
   artifactAllowsTextSelection,
   AsyncTaskGate,
   attachToolDetails,
+  blendHex,
+  formatElapsed,
+  gitDiffFileStats,
+  gitDiffGutterWidth,
+  gitDiffSummary,
+  helpSegments,
+  parseGitDiffHunkHeader,
+  spinnerFrame,
+  statusGlyphForKind,
+  statusTimeoutMs,
+  visibleGitDiffLineIndices,
   compactSessionDetails,
   continuationRunArguments,
   contextualHelp,
@@ -68,8 +80,11 @@ import {
   type Session,
   type ToolEventDetail,
   type TraceActivity,
+  type GitDiffFileStats,
   type GitDiffLine,
+  type GitDiffSummary,
   type GitDiffTreeEntry,
+  type StatusKind,
   type TUILayout,
   type ViewState,
 } from "./core";
@@ -191,11 +206,38 @@ interface ActivityRow {
   id: string;
   activity?: TraceActivity;
   diff?: GitDiffLine;
+  /** Index into the full parsed diff for diff rows (folding hides rows). */
+  lineIndex?: number;
   detail?: ToolEventDetail;
   chat?: ChatEntry;
+  /** Animated "working" row appended while the selected session is active. */
+  live?: boolean;
   text: string;
   copyText: string;
 }
+
+const ANIMATION_INTERVAL_MS = 100;
+const LIVE_ROW_ID = "live";
+
+interface DiffTints {
+  additionBg: string;
+  deletionBg: string;
+  additionGutterBg: string;
+  deletionGutterBg: string;
+  hunkBg: string;
+}
+
+function diffTintsFor(theme: ThemePalette): DiffTints {
+  return {
+    additionBg: blendHex(theme.background, theme.success, 0.14),
+    deletionBg: blendHex(theme.background, theme.danger, 0.14),
+    additionGutterBg: blendHex(theme.background, theme.success, 0.24),
+    deletionGutterBg: blendHex(theme.background, theme.danger, 0.24),
+    hunkBg: blendHex(theme.background, theme.accent, 0.08),
+  };
+}
+
+let diffTints: DiffTints = diffTintsFor(palette);
 
 // The TUI resolves "auto" once when the input opens. A status change can then
 // reject the captured command, but it can never convert prompt into steer.
@@ -269,6 +311,20 @@ async function main(): Promise<void> {
     let diffNavigationPrefix: "[" | "]" | undefined;
     let diffNavigationTimer: ReturnType<typeof setTimeout> | undefined;
     const collapsedDiffDirectories = new Set<string>();
+    const collapsedDiffFiles = new Set<string>();
+    let diffLines: GitDiffLine[] = [];
+    let diffSummary: GitDiffSummary | undefined;
+    let diffFileStats = new Map<string, GitDiffFileStats>();
+    let diffGutterWidth = 2;
+    let diffError: string | undefined;
+    let animationTick = 0;
+    let statusState: { message: string; kind: StatusKind; idle: boolean } = {
+      message: "",
+      kind: "info",
+      idle: true,
+    };
+    let statusTimer: ReturnType<typeof setTimeout> | undefined;
+    let lastRefreshAt = 0;
 
     const sessionList = new SelectRenderable(renderer, {
       id: "sessions",
@@ -325,7 +381,9 @@ async function main(): Promise<void> {
             isLive(session) ? success : accent,
           );
           buffer.drawText(
-            statusGlyph(session.status),
+            session.status === "active" || session.status === "starting"
+              ? spinnerFrame(animationTick)
+              : statusGlyph(session.status),
             labelX + group.length + 2,
             rowY,
             statusColor,
@@ -386,7 +444,6 @@ async function main(): Promise<void> {
     const chatTab = new TextRenderable(renderer, {
       content: "chat",
       fg: palette.accent,
-      attributes: TextAttributes.BOLD,
     });
     const activityTab = new TextRenderable(renderer, {
       content: "activity",
@@ -414,6 +471,18 @@ async function main(): Promise<void> {
       content: "",
       fg: palette.warning,
     });
+    // Live pulse for the selected session: spinner + elapsed while it works.
+    const workingIndicator = new TextRenderable(renderer, {
+      content: "",
+      fg: palette.success,
+    });
+    const tabsRight = new BoxRenderable(renderer, {
+      height: 1,
+      flexDirection: "row",
+      gap: 2,
+    });
+    tabsRight.add(workingIndicator);
+    tabsRight.add(followIndicator);
     const tabsBar = new BoxRenderable(renderer, {
       width: "100%",
       height: 1,
@@ -423,7 +492,7 @@ async function main(): Promise<void> {
       paddingRight: 1,
     });
     tabsBar.add(tabsLeft);
-    tabsBar.add(followIndicator);
+    tabsBar.add(tabsRight);
 
     const artifactScroll = new ScrollBoxRenderable(renderer, {
       id: "artifact",
@@ -441,11 +510,20 @@ async function main(): Promise<void> {
         },
       },
     });
+    const diffSummaryLine = new TextRenderable(renderer, {
+      id: "diff-summary",
+      content: "",
+      fg: palette.dim,
+      height: 1,
+      width: "100%",
+      paddingLeft: 1,
+      wrapMode: "none",
+      truncate: true,
+    });
     const diffFileList = new SelectRenderable(renderer, {
       id: "diff-files",
-      width: 30,
-      height: "100%",
-      flexShrink: 0,
+      width: "100%",
+      flexGrow: 1,
       options: [],
       showDescription: false,
       showScrollIndicator: true,
@@ -456,7 +534,6 @@ async function main(): Promise<void> {
       focusedTextColor: palette.text,
       selectedBackgroundColor: palette.selected,
       selectedTextColor: palette.accent,
-      visible: false,
       renderAfter(buffer) {
         const options = this.options;
         const visibleItems = Math.max(1, Math.floor(this.height));
@@ -500,6 +577,17 @@ async function main(): Promise<void> {
         }
       },
     });
+    const diffSidebar = new BoxRenderable(renderer, {
+      id: "diff-sidebar",
+      width: 30,
+      height: "100%",
+      flexShrink: 0,
+      flexDirection: "column",
+      backgroundColor: palette.panel,
+      visible: false,
+    });
+    diffSidebar.add(diffSummaryLine);
+    diffSidebar.add(diffFileList);
     const diffDivider = new BoxRenderable(renderer, {
       id: "diff-divider",
       width: 1,
@@ -513,8 +601,17 @@ async function main(): Promise<void> {
             ? palette.accent
             : palette.border,
         );
-        for (let y = 0; y < this.height; y++)
-          buffer.drawText("│", 0, y, color);
+        const gripStart = Math.max(0, Math.floor(this.height / 2) - 1);
+        const active = diffDividerDragging || diffDividerHovered;
+        for (let y = 0; y < this.height; y++) {
+          const grip = y >= gripStart && y < gripStart + 3;
+          buffer.drawText(
+            grip ? "┃" : "┆",
+            0,
+            y,
+            grip && !active ? parseColor(palette.dim) : color,
+          );
+        }
       },
     });
     const artifactBody = new BoxRenderable(renderer, {
@@ -523,7 +620,7 @@ async function main(): Promise<void> {
       flexDirection: "row",
       gap: 0,
     });
-    artifactBody.add(diffFileList);
+    artifactBody.add(diffSidebar);
     artifactBody.add(diffDivider);
     artifactBody.add(artifactScroll);
     // Borderless main surface: the conversation floats on the background the
@@ -866,8 +963,9 @@ async function main(): Promise<void> {
         artifactBody.x,
         artifactBody.width,
       );
-      diffFileList.width = diffTreeWidth;
+      diffSidebar.width = diffTreeWidth;
       diffDivider.requestRender();
+      updateDiffFileTree();
     };
     const finishDiffTreeDrag = () => {
       if (!diffDividerDragging) return;
@@ -928,38 +1026,89 @@ async function main(): Promise<void> {
         updateDiffFileTree(entry.path);
         return;
       }
-      jumpToDiffRow(entry.rowIndex);
+      jumpToDiffLine(entry.rowIndex);
     }
-    function jumpToDiffRow(rowIndex: unknown): void {
-      if (view.artifact !== "diff" || typeof rowIndex !== "number") return;
+    /** Jump to a row by its index in the full parsed diff (tree row index). */
+    function jumpToDiffLine(lineIndex: unknown): void {
+      if (view.artifact !== "diff" || typeof lineIndex !== "number") return;
+      const rowIndex = artifactRows.findIndex(
+        (row) => row.lineIndex === lineIndex,
+      );
+      if (rowIndex < 0) return;
+      jumpToDiffRow(rowIndex);
+    }
+    function jumpToDiffRow(rowIndex: number): void {
+      if (view.artifact !== "diff") return;
+      const previousRow = selectedRow;
       selectedRow = rowIndex;
       artifactFollowing = false;
-      renderArtifactRows(true);
       artifactScroll.stickyScroll = false;
-      artifactScroll.scrollTo({ x: 0, y: selectedRow });
+      refreshArtifactRow(previousRow);
+      refreshArtifactRow(selectedRow);
+      artifactScroll.scrollTo({ x: 0, y: Math.max(0, selectedRow - 1) });
       updateChrome();
     }
 
+    // Diff rows carry placeholder context lines for the blank spacer rows so
+    // boundary search keeps working on the visible row list.
+    function diffRowLines(): GitDiffLine[] {
+      return artifactRows.map(
+        (row) => row.diff ?? { kind: "context", text: "" },
+      );
+    }
+
     function moveToDiffBoundary(kind: "hunk" | "file", direction: number): void {
-      const lines = artifactRows.flatMap((row) => (row.diff ? [row.diff] : []));
+      const lines = diffRowLines();
       const target = nextGitDiffBoundary(lines, selectedRow, kind, direction);
       if (target === undefined) {
         setStatus(`No diff ${kind}s`, true);
         return;
       }
       jumpToDiffRow(target);
-      if (kind === "file") {
-        const optionIndex = diffFileList.options.findIndex(
-          (option) =>
-            (option.value as GitDiffTreeEntry | undefined)?.kind === "file" &&
-            (option.value as GitDiffTreeEntry).rowIndex === target,
-        );
-        if (optionIndex >= 0) diffFileList.setSelectedIndex(optionIndex);
-      }
+      syncDiffTreeToRow(target);
       const boundaries = lines.flatMap((line, index) =>
         line.kind === kind ? [index] : [],
       );
       setStatus(`${kind === "hunk" ? "Hunk" : "File"} ${boundaries.indexOf(target) + 1} of ${boundaries.length}`);
+    }
+
+    function syncDiffTreeToRow(rowIndex: number): void {
+      const path = artifactRows[rowIndex]?.diff?.path;
+      if (!path) return;
+      const optionIndex = diffFileList.options.findIndex(
+        (option) =>
+          (option.value as GitDiffTreeEntry | undefined)?.kind === "file" &&
+          (option.value as GitDiffTreeEntry).path === path,
+      );
+      if (optionIndex >= 0 && optionIndex !== diffFileList.getSelectedIndex())
+        diffFileList.setSelectedIndex(optionIndex);
+    }
+
+    function toggleDiffFile(path: string): void {
+      if (view.artifact !== "diff") return;
+      const folded = !collapsedDiffFiles.has(path);
+      if (folded) collapsedDiffFiles.add(path);
+      else collapsedDiffFiles.delete(path);
+      setArtifactRows(buildDiffRows());
+      const headerRow = artifactRows.findIndex(
+        (row) => row.diff?.kind === "file" && row.diff.path === path,
+      );
+      if (headerRow >= 0) jumpToDiffRow(headerRow);
+      updateDiffFileTree(path);
+      setStatus(`${folded ? "Folded" : "Unfolded"} ${path}`);
+    }
+
+    function toggleAllDiffFiles(): void {
+      if (view.artifact !== "diff" || diffLines.length === 0) return;
+      const paths = [...diffFileStats.keys()];
+      const foldAll = collapsedDiffFiles.size < paths.length;
+      collapsedDiffFiles.clear();
+      if (foldAll) for (const path of paths) collapsedDiffFiles.add(path);
+      setArtifactRows(buildDiffRows());
+      if (selectedRow >= artifactRows.length) selectedRow = 0;
+      renderArtifactRows(true);
+      updateDiffFileTree();
+      setStatus(foldAll ? "Folded every file" : "Unfolded every file");
     }
     renderer.on("resize", () => updateChrome());
     themePanel.onMouseDown = () => themePicker.focus();
@@ -1123,6 +1272,18 @@ async function main(): Promise<void> {
         }
         diffNavigationPrefix = undefined;
         if (diffNavigationTimer) clearTimeout(diffNavigationTimer);
+        if (key.name === "z" && key.shift) {
+          key.preventDefault();
+          key.stopPropagation();
+          toggleAllDiffFiles();
+          return;
+        }
+        if (key.name === "z" || key.name === "space") {
+          key.preventDefault();
+          key.stopPropagation();
+          activateSelectedRow();
+          return;
+        }
       }
 
       const navigation = dashboardNavigation(layout, view.focus, key.name);
@@ -1185,7 +1346,7 @@ async function main(): Promise<void> {
         (key.name === "return" || key.name === "enter") &&
         view.focus === "artifact"
       )
-        toggleSelectedTool();
+        activateSelectedRow();
       else if (key.name === "end" && view.focus === "artifact")
         resumeFollowing();
       else if (view.focus === "artifact" && key.name === "j")
@@ -1236,7 +1397,7 @@ async function main(): Promise<void> {
       closeThemePicker();
       try {
         await persistTheme(activeThemeName);
-        setStatus(`Theme saved: ${findTheme(activeThemeName)!.label}`);
+        setStatus(`Theme saved: ${findTheme(activeThemeName)!.label}`, "success");
       } catch (error) {
         setStatus(`Theme changed, but could not save: ${errorMessage(error)}`, true);
       }
@@ -1267,6 +1428,10 @@ async function main(): Promise<void> {
       diffFileList.selectedTextColor = palette.accent;
       diffDivider.backgroundColor = palette.background;
       diffDivider.requestRender();
+      diffSidebar.backgroundColor = palette.panel;
+      diffSummaryLine.fg = palette.dim;
+      diffTints = diffTintsFor(palette);
+      workingIndicator.fg = palette.success;
       sessionsPanel.borderColor = palette.border;
       sessionsPanel.focusedBorderColor = palette.accent;
       sessionsPanel.titleColor = palette.accent;
@@ -1568,7 +1733,7 @@ async function main(): Promise<void> {
       }));
       dejaPicker.setSelectedIndex(0);
       dejaPicker.focus();
-      setStatus(`${dejaHits.length} resumable sessions found`);
+      setStatus(`${dejaHits.length} resumable sessions found`, "success");
     }
 
     function closeDejaPicker(): void {
@@ -1632,6 +1797,20 @@ async function main(): Promise<void> {
     }
 
     function updatePromptChrome(): void {
+      const modeTitle =
+        promptMode === "steer"
+          ? " steer "
+          : promptMode === "prompt"
+            ? " prompt "
+            : promptMode === "continue"
+              ? " continue thread "
+              : promptMode === "new"
+                ? pendingResume
+                  ? " resume session "
+                  : " new session "
+                : "";
+      promptPanel.title = modeTitle;
+      promptPanel.borderColor = promptMode ? palette.accent : palette.border;
       const promptStateDir = promptTarget?.stateDir;
       const session =
         promptMode && promptMode !== "new" && promptStateDir
@@ -1751,7 +1930,7 @@ async function main(): Promise<void> {
           args.rudder,
           idlePromptControlArguments(session.stateDir, messageFile),
         );
-        setStatus(result || "Prompt accepted");
+        setStatus(result || "Prompt accepted", "success");
         await refresh();
         setTimeout(() => void refresh(), 300);
       } catch (error) {
@@ -1832,7 +2011,7 @@ async function main(): Promise<void> {
           args.rudder,
           steerControlArguments(session.stateDir, session.turnId!, messageFile),
         );
-        setStatus(result || "Steer accepted");
+        setStatus(result || "Steer accepted", "success");
         await refresh();
       } catch (error) {
         setStatus(errorMessage(error), true);
@@ -1880,7 +2059,8 @@ async function main(): Promise<void> {
         child.unref();
         args.stateDirs.push(stateDirectory);
         setStatus(
-          `Started a new run for thread ${session.threadId.slice(0, 12)}…`,
+          `Started a new run for thread ${session.threadId.slice(0, 12)}`,
+          "success",
         );
         setTimeout(() => void refresh(), 250);
       } catch (error) {
@@ -1904,24 +2084,19 @@ async function main(): Promise<void> {
       const now = Date.now();
       if (view.interruptArmedUntil < now) {
         view = reduceView(view, { type: "arm-interrupt", now });
-        setStatus(
-          idle
-            ? "Press x again within 2 seconds to end the idle session"
-            : "Press x again within 2 seconds to interrupt the selected turn",
-          true,
-        );
+        renderStatus();
         return;
       }
       view = reduceView(view, { type: "clear-interrupt" });
       actionRunning = true;
-      setStatus(idle ? "Ending idle session…" : "Interrupting selected turn…", true);
+      setStatus(idle ? "Ending idle session…" : "Interrupting selected turn…", "warning");
       try {
         const result = await runControl(args.rudder, [
           idle ? "stop" : "interrupt",
           "--state-dir",
           session.stateDir,
         ]);
-        setStatus(result || (idle ? "Shutdown requested" : "Interrupt requested"));
+        setStatus(result || (idle ? "Shutdown requested" : "Interrupt requested"), "success");
         await refresh();
       } catch (error) {
         setStatus(errorMessage(error), true);
@@ -1945,7 +2120,8 @@ async function main(): Promise<void> {
           );
           applySessionFilter();
           await updateSelectedSession();
-          if (reason) setStatus("Watching for session changes");
+          lastRefreshAt = Date.now();
+          if (reason) showIdleStatus();
         } catch (error) {
           setStatus(errorMessage(error), true);
         }
@@ -1993,7 +2169,10 @@ async function main(): Promise<void> {
       if (artifactKey !== currentKey) {
         artifactKey = currentKey;
         artifactSignature = "";
-        artifactFollowing = true;
+        // The diff reads top-down; every other artifact tails its newest rows.
+        artifactFollowing = view.artifact !== "diff";
+        artifactScroll.stickyScroll = artifactFollowing;
+        if (!artifactFollowing) artifactScroll.scrollTo({ x: 0, y: 0 });
         unseenRows = 0;
         previousRowCount = 0;
         selectedRow = -1;
@@ -2031,7 +2210,7 @@ async function main(): Promise<void> {
         }
         setArtifactRows(
           rows.length > 0
-            ? rows
+            ? [...rows, ...liveRow(session)]
             : [
                 {
                   id: "empty",
@@ -2040,6 +2219,7 @@ async function main(): Promise<void> {
                     : "No conversation yet — type below to send a prompt.",
                   copyText: "",
                 },
+                ...liveRow(session),
               ],
         );
       } else if (view.artifact === "trace") {
@@ -2070,13 +2250,14 @@ async function main(): Promise<void> {
         });
         setArtifactRows(
           rows.length > 0
-            ? rows
+            ? [...rows, ...liveRow(session)]
             : [
                 {
                   id: "empty",
                   text: "No activity has been recorded yet.",
                   copyText: "",
                 },
+                ...liveRow(session),
               ],
         );
       } else if (view.artifact === "output") {
@@ -2096,29 +2277,59 @@ async function main(): Promise<void> {
             ];
         setArtifactRows(rows);
       } else {
-        const lines = parseGitDiff(diffResult?.content ?? "");
-        const rows: ActivityRow[] = lines.map((diff, index) => ({
+        diffLines = parseGitDiff(diffResult?.content ?? "");
+        diffSummary = gitDiffSummary(diffLines);
+        diffFileStats = gitDiffFileStats(diffLines);
+        diffGutterWidth = gitDiffGutterWidth(diffLines);
+        diffError =
+          diffResult?.error ??
+          (session.cwd ? undefined : "This session has no working directory.");
+        for (const path of collapsedDiffFiles)
+          if (!diffFileStats.has(path)) collapsedDiffFiles.delete(path);
+        setArtifactRows(buildDiffRows());
+      }
+    }
+
+    function buildDiffRows(): ActivityRow[] {
+      if (diffLines.length === 0) {
+        if (diffError)
+          return [{ id: "empty", text: `× ${diffError}`, copyText: "" }];
+        return [
+          { id: "empty", text: "✓ Working tree matches HEAD", copyText: "" },
+          {
+            id: "empty-hint",
+            text: "  Tracked changes appear here as the session edits files. Untracked files are not shown.",
+            copyText: "",
+          },
+        ];
+      }
+      const rows: ActivityRow[] = [];
+      for (const index of visibleGitDiffLineIndices(diffLines, collapsedDiffFiles)) {
+        const diff = diffLines[index];
+        if (diff.kind === "file" && rows.length > 0)
+          rows.push({ id: `diff-gap:${diff.path}`, text: "", copyText: "" });
+        rows.push({
           id: `diff:${index}:${diff.text}`,
           diff,
+          lineIndex: index,
           text: diff.text,
           copyText: diff.text,
-        }));
-        setArtifactRows(
-          rows.length > 0
-            ? rows
-            : [
-                {
-                  id: "empty",
-                  text:
-                    diffResult?.error ??
-                    (session.cwd
-                      ? "No tracked changes against HEAD."
-                      : "This session has no working directory."),
-                  copyText: "",
-                },
-              ],
-        );
+        });
       }
+      return rows;
+    }
+
+    function liveRow(session: Session | undefined): ActivityRow[] {
+      return session?.status === "active" || session?.status === "starting"
+        ? [{ id: LIVE_ROW_ID, live: true, text: "", copyText: "" }]
+        : [];
+    }
+
+    function activateSelectedRow(): void {
+      const row = artifactRows[selectedRow];
+      if (!row) return;
+      if (row.diff?.path) toggleDiffFile(row.diff.path);
+      else toggleSelectedTool();
     }
 
     function setArtifactRows(rows: ActivityRow[]): void {
@@ -2142,23 +2353,48 @@ async function main(): Promise<void> {
 
     function updateDiffFileTree(selectedPath?: string): void {
       const entries = gitDiffTree(
-        artifactRows.flatMap((row) => (row.diff ? [row.diff] : [])),
+        diffLines,
         collapsedDiffDirectories,
+        collapsedDiffFiles,
       );
       diffFileList.options = entries.map((entry) => ({
-        name:
-          entry.kind === "file"
-            ? entry.label.replace(/[MADR]  \+\d+ −\d+$/, "")
-            : entry.label,
+        name: entry.kind === "file" ? diffTreeFileName(entry) : entry.label,
         description: "",
         value: entry,
       }));
+      updateDiffSummaryLine();
       if (selectedPath) {
         const selectedIndex = entries.findIndex(
           (entry) => entry.path === selectedPath,
         );
         if (selectedIndex >= 0) diffFileList.setSelectedIndex(selectedIndex);
       }
+    }
+
+    // Leaves a fixed column free on the right for "M  +12 −3" so the counts
+    // drawn by renderAfter never overlap a long file name.
+    function diffTreeFileName(entry: GitDiffTreeEntry): string {
+      const match = /^(\s*)  󰈔 (.+?)  [MADR]  (\+\d+ −\d+)$/.exec(entry.label);
+      if (!match) return entry.label;
+      const [, indent, name, counts] = match;
+      const icon = entry.collapsed ? "▸" : "󰈔";
+      const reserved = counts.length + 4 + 4; // status letter, gaps, indicator
+      const available = Math.max(6, diffTreeWidth - 3 - indent.length - 4 - reserved);
+      const shown =
+        name.length <= available
+          ? name
+          : `${name.slice(0, Math.max(1, Math.ceil((available - 1) / 2)))}…${name.slice(-(Math.floor((available - 1) / 2)))}`;
+      return `${indent}  ${icon} ${shown}`;
+    }
+
+    function updateDiffSummaryLine(): void {
+      if (!diffSummary || diffSummary.files === 0) {
+        diffSummaryLine.content = t`${fg(palette.dim)("no changes")}`;
+        return;
+      }
+      const folded =
+        collapsedDiffFiles.size > 0 ? ` · ${collapsedDiffFiles.size} folded` : "";
+      diffSummaryLine.content = t`${fg(palette.text)(`${diffSummary.files} ${diffSummary.files === 1 ? "file" : "files"}`)} ${fg(palette.success)(`+${diffSummary.additions}`)} ${fg(palette.danger)(`−${diffSummary.deletions}`)}${fg(palette.dim)(folded)}`;
     }
 
     function renderArtifactRows(preserveScroll: boolean): void {
@@ -2171,10 +2407,7 @@ async function main(): Promise<void> {
         const match = rowMatchesQuery(row);
         const renderable = new TextRenderable(renderer, {
           id: `artifact-row-${index}`,
-          width:
-            view.artifact === "diff"
-              ? Math.max(artifactScroll.width, row.text.length + 4)
-              : "100%",
+          width: view.artifact === "diff" ? diffRowWidth(row) : "100%",
           wrapMode: view.artifact === "diff" ? "none" : "word",
           content: renderArtifactRow(row, match, index === selectedRow),
           fg: palette.text,
@@ -2189,7 +2422,12 @@ async function main(): Promise<void> {
           selectedRow = index;
           refreshArtifactRow(previousRow);
           if (row.activity?.kind === "tool") toggleTool(row.id);
-          else refreshArtifactRow(index);
+          else if (row.diff?.kind === "file" && row.diff.path)
+            toggleDiffFile(row.diff.path);
+          else {
+            refreshArtifactRow(index);
+            if (row.diff) syncDiffTreeToRow(index);
+          }
         };
         artifactScroll.add(renderable);
         return renderable;
@@ -2213,39 +2451,28 @@ async function main(): Promise<void> {
           ...marker.chunks,
           ...renderChatEntry(row.chat).chunks,
         ]);
-      if (row.diff) {
-        const color =
-          row.diff.kind === "addition"
-            ? palette.success
-            : row.diff.kind === "deletion"
-              ? palette.danger
-              : row.diff.kind === "hunk"
-                ? palette.accent
-                : row.diff.kind === "file"
-                  ? palette.warning
-                  : row.diff.kind === "metadata"
-                    ? palette.dim
-                    : palette.text;
-        const displayText =
-          row.diff.kind === "file"
-            ? row.text.replace(/^diff --git a\/(.+) b\/(.+)$/, "▾ $2")
-            : row.text;
-        const styled =
-          row.diff.kind === "file"
-            ? bold(fg(color)(displayText))
-            : fg(color)(displayText);
+      if (row.live)
+        return t`${fg(palette.success)(spinnerFrame(animationTick))} ${italic(fg(palette.dim)(liveRowText()))}`;
+      if (row.diff) return renderDiffRow(row, match, selected);
+      if (view.artifact === "diff" && row.id.startsWith("diff-gap:"))
+        return renderDiffSpacerRow(row, selected);
+      if (view.artifact === "output" || !row.activity) {
+        // Empty-state rows lead with a status glyph; color it like a toast.
+        const glyphColor = row.text.startsWith("✓ ")
+          ? palette.success
+          : row.text.startsWith("× ")
+            ? palette.danger
+            : undefined;
+        const body =
+          glyphColor && row.id.startsWith("empty")
+            ? t`${bold(fg(glyphColor)(row.text.slice(0, 1)))}${fg(palette.text)(row.text.slice(1))}`
+            : t`${fg(row.id.startsWith("empty") ? palette.dim : palette.text)(row.text)}`;
         return new StyledText([
           ...selection.chunks,
           ...marker.chunks,
-          ...t`${styled}`.chunks,
+          ...body.chunks,
         ]);
       }
-      if (view.artifact === "output" || !row.activity)
-        return new StyledText([
-          ...selection.chunks,
-          ...marker.chunks,
-          ...t`${fg(palette.text)(row.text)}`.chunks,
-        ]);
       const base = renderTraceActivity(row.activity, row.detail);
       const chunks = [...selection.chunks, ...marker.chunks, ...base.chunks];
       if (row.activity.kind === "tool" && expandedToolIDs.has(row.id))
@@ -2253,15 +2480,143 @@ async function main(): Promise<void> {
       return new StyledText(chunks);
     }
 
+    function liveRowText(): string {
+      const session = selectedSession();
+      if (!session) return "";
+      const elapsed = formatElapsed(session.startedAt, undefined);
+      const verb = session.status === "starting" ? "starting" : "working";
+      return `${verb} · ${elapsed}`;
+    }
+
+    function renderDiffSpacerRow(row: ActivityRow, selected: boolean): StyledText {
+      const width = diffRowWidth(row);
+      const text = " ".repeat(width);
+      return selected ? t`${bg(palette.selected)(text)}` : t`${text}`;
+    }
+
+    function padCells(text: string, width: number): string {
+      const missing = width - [...text].length;
+      return missing > 0 ? text + " ".repeat(missing) : text;
+    }
+
+    function renderDiffRow(
+      row: ActivityRow,
+      match: boolean,
+      selected: boolean,
+    ): StyledText {
+      const diff = row.diff!;
+      const width = diffRowWidth(row);
+      const gutterWidth = diffGutterWidth;
+      const blankGutter = " ".repeat(diffGutterCells());
+      const markerText = match ? "◆" : " ";
+      const markerColor = match ? palette.warning : palette.dim;
+
+      if (diff.kind === "file") {
+        const path = diff.path ?? diff.text;
+        const stats = diffFileStats.get(path);
+        const folded = collapsedDiffFiles.has(path);
+        const rowBg = selected ? palette.selected : palette.panel;
+        const statusColor =
+          stats?.status === "A"
+            ? palette.success
+            : stats?.status === "D"
+              ? palette.danger
+              : stats?.status === "R"
+                ? palette.warning
+                : palette.accent;
+        const head = ` ${folded ? "▸" : "▾"} ${path}`;
+        const counts = stats
+          ? `  ${stats.status}  +${stats.additions} −${stats.deletions}`
+          : "";
+        const tail = padCells("", Math.max(0, width - [...head].length - [...counts].length - (folded ? 9 : 0)));
+        const chunks = [
+          ...t`${bg(rowBg)(fg(markerColor)(markerText))}${bg(rowBg)(bold(fg(palette.accent)(head)))}`.chunks,
+        ];
+        if (stats)
+          chunks.push(
+            ...t`${bg(rowBg)(fg(palette.dim)("  "))}${bg(rowBg)(bold(fg(statusColor)(stats.status)))}${bg(rowBg)(fg(palette.dim)("  "))}${bg(rowBg)(fg(palette.success)(`+${stats.additions}`))}${bg(rowBg)(fg(palette.dim)(" "))}${bg(rowBg)(fg(palette.danger)(`−${stats.deletions}`))}`
+              .chunks,
+          );
+        if (folded)
+          chunks.push(...t`${bg(rowBg)(italic(fg(palette.dim)("  folded")))}`.chunks);
+        chunks.push(...t`${bg(rowBg)(tail)}`.chunks);
+        return new StyledText(chunks);
+      }
+
+      if (diff.kind === "hunk") {
+        const header = parseGitDiffHunkHeader(diff.text);
+        const rowBg = selected ? palette.selected : diffTints.hunkBg;
+        const range = header
+          ? `@@ -${header.oldStart},${header.oldCount} +${header.newStart},${header.newCount} @@`
+          : diff.text;
+        const context = header?.context ? ` ${header.context}` : "";
+        const body = ` ${range}${context}`;
+        const tail = padCells("", Math.max(0, width - diffGutterCells() - 1 - [...body].length));
+        return t`${bg(rowBg)(fg(markerColor)(markerText))}${bg(rowBg)(fg(palette.dim)(blankGutter.slice(1)))}${bg(rowBg)(fg(palette.accent)(` ${range}`))}${bg(rowBg)(italic(fg(palette.dim)(context)))}${bg(rowBg)(tail)}`;
+      }
+
+      if (diff.kind === "metadata") {
+        const rowBg = selected ? palette.selected : palette.background;
+        const body = ` ${diff.text}`;
+        const tail = padCells("", Math.max(0, width - diffGutterCells() - 1 - [...body].length));
+        return t`${bg(rowBg)(fg(markerColor)(markerText))}${bg(rowBg)(blankGutter.slice(1))}${bg(rowBg)(fg(palette.dim)(body))}${bg(rowBg)(tail)}`;
+      }
+
+      const oldNumber =
+        diff.oldLine === undefined ? "" : String(diff.oldLine);
+      const newNumber =
+        diff.newLine === undefined ? "" : String(diff.newLine);
+      const gutter = `${oldNumber.padStart(gutterWidth)} ${newNumber.padStart(gutterWidth)} `;
+      const sign = diff.text[0] ?? " ";
+      const content = diff.text.slice(1);
+      const lineBg = selected
+        ? palette.selected
+        : diff.kind === "addition"
+          ? diffTints.additionBg
+          : diff.kind === "deletion"
+            ? diffTints.deletionBg
+            : palette.background;
+      const gutterBg = selected
+        ? palette.selected
+        : diff.kind === "addition"
+          ? diffTints.additionGutterBg
+          : diff.kind === "deletion"
+            ? diffTints.deletionGutterBg
+            : palette.background;
+      const signColor =
+        diff.kind === "addition"
+          ? palette.success
+          : diff.kind === "deletion"
+            ? palette.danger
+            : palette.dim;
+      const contentColor =
+        diff.kind === "context" ? palette.dim : palette.text;
+      const tail = padCells("", Math.max(0, width - diffGutterCells() - 1 - [...content].length));
+      return t`${bg(gutterBg)(fg(markerColor)(markerText))}${bg(gutterBg)(fg(palette.dim)(gutter))}${bg(lineBg)(bold(fg(signColor)(sign)))}${bg(lineBg)(fg(contentColor)(content))}${bg(lineBg)(tail)}`;
+    }
+
     function refreshArtifactRow(index: number): void {
       const row = artifactRows[index];
       const renderable = rowRenderables[index];
       if (!row || !renderable) return;
+      if (view.artifact === "diff") renderable.width = diffRowWidth(row);
       renderable.content = renderArtifactRow(
         row,
         rowMatchesQuery(row),
         index === selectedRow,
       );
+    }
+
+    function diffGutterCells(): number {
+      return diffGutterWidth * 2 + 3;
+    }
+
+    function diffRowWidth(row: ActivityRow): number {
+      const textWidth =
+        row.diff?.kind === "file"
+          ? (row.diff.path?.length ?? row.text.length) + 24
+          : row.text.length;
+      return Math.max(artifactScroll.width, diffGutterCells() + textWidth + 3);
     }
 
     function toggleSelectedTool(): void {
@@ -2342,7 +2697,7 @@ async function main(): Promise<void> {
       const copied = renderer.copyToClipboardOSC52(value);
       setStatus(
         copied ? "Copied selection" : "Terminal clipboard copy is unavailable",
-        !copied,
+        copied ? "success" : "error",
       );
     }
 
@@ -2391,12 +2746,12 @@ async function main(): Promise<void> {
       ];
       for (const [tab, artifact] of tabs) {
         const selected = view.artifact === artifact;
-        tab.fg = selected ? palette.accent : palette.dim;
-        tab.attributes = selected ? TextAttributes.BOLD : TextAttributes.NONE;
+        tab.content = renderTabLabel(artifact, selected);
       }
-      diffFileList.visible = view.artifact === "diff" && renderer.width >= 100;
-      diffDivider.visible = diffFileList.visible;
-      diffFileList.width = diffTreeWidth;
+      diffSidebar.visible = view.artifact === "diff" && renderer.width >= 100;
+      diffDivider.visible = diffSidebar.visible;
+      diffSidebar.width = diffTreeWidth;
+      updateDiffSummaryLine();
       followIndicator.content = view.artifact === "diff" || artifactFollowing
         ? ""
         : `paused${unseenRows > 0 ? ` · ${unseenRows} new` : ""} · End resumes`;
@@ -2404,16 +2759,54 @@ async function main(): Promise<void> {
       const query = artifactQueries[view.artifact];
       sessionsPanel.borderColor =
         view.focus === "sessions" ? palette.accent : palette.border;
-      footerLeft.content = sessionLocationSummary(session);
-      footerRight.content = ` ${contextualHelp({
-        layout,
-        focus: view.focus,
-        session,
-        hasQuery: Boolean(query),
-        dejaAvailable,
-        compact: renderer.width < 120,
-      })}`;
+      footerLeft.content = renderLocation(sessionLocationSummary(session));
+      footerRight.content = renderHelp(
+        contextualHelp({
+          layout,
+          focus: view.focus,
+          session,
+          hasQuery: Boolean(query),
+          dejaAvailable,
+          compact: renderer.width < 120,
+          artifact: view.focus === "artifact" ? view.artifact : undefined,
+        }),
+      );
+      updateWorkingIndicator();
+      renderStatus();
       updatePromptChrome();
+    }
+
+    function renderTabLabel(artifact: Artifact, selected: boolean): StyledText {
+      const label =
+        artifact === "trace" ? "activity" : artifact;
+      const color = selected ? palette.accent : palette.dim;
+      const name = selected
+        ? underline(bold(fg(color)(label)))
+        : fg(color)(label);
+      if (artifact === "diff" && diffSummary && diffSummary.files > 0) {
+        const additions = selected ? palette.success : palette.dim;
+        const deletions = selected ? palette.danger : palette.dim;
+        return t`${name} ${fg(additions)(`+${diffSummary.additions}`)} ${fg(deletions)(`−${diffSummary.deletions}`)}`;
+      }
+      return t`${name}`;
+    }
+
+    function renderHelp(help: string): StyledText {
+      const chunks: StyledText["chunks"] = [...t` `.chunks];
+      for (const [index, segment] of helpSegments(help).entries()) {
+        if (index > 0) chunks.push(...t`${fg(palette.border)("  ")}`.chunks);
+        chunks.push(
+          ...t`${bold(fg(palette.accent)(segment.key))} ${fg(palette.dim)(segment.label)}`
+            .chunks,
+        );
+      }
+      return new StyledText(chunks);
+    }
+
+    function renderLocation(location: string): StyledText {
+      const separator = location.lastIndexOf(":");
+      if (separator <= 0) return t`${fg(palette.dim)(location)}`;
+      return t`${fg(palette.dim)(location.slice(0, separator))}${fg(palette.border)(":")}${fg(palette.accent)(location.slice(separator + 1))}`;
     }
 
     // "~/dev/rudder:main" for the footer's left corner, opencode style.
@@ -2456,9 +2849,112 @@ async function main(): Promise<void> {
       return parts.join(" · ");
     }
 
-    function setStatus(message: string, danger = false): void {
-      statusLine.content = message;
-      statusLine.fg = danger ? palette.danger : palette.dim;
+    function setStatus(
+      message: string,
+      danger: boolean | StatusKind = false,
+      kind?: StatusKind,
+    ): void {
+      const resolved: StatusKind =
+        typeof danger === "string" ? danger : danger ? "error" : (kind ?? "info");
+      statusState = { message, kind: resolved, idle: false };
+      if (statusTimer) clearTimeout(statusTimer);
+      statusTimer = setTimeout(showIdleStatus, statusTimeoutMs(resolved));
+      renderStatus();
+    }
+
+    function showIdleStatus(): void {
+      if (statusTimer) clearTimeout(statusTimer);
+      statusTimer = undefined;
+      statusState = { message: "", kind: "info", idle: true };
+      renderStatus();
+    }
+
+    function renderStatus(): void {
+      if (destroyed) return;
+      const now = Date.now();
+      if (view.interruptArmedUntil > now) {
+        const remaining = Math.max(1, Math.ceil((view.interruptArmedUntil - now) / 1000));
+        const idle = selectedSession()?.status === "idle";
+        statusLine.content = t`${bold(fg(palette.warning)("!"))} ${fg(palette.warning)(`Press x again to ${idle ? "end the idle session" : "interrupt the turn"}`)} ${fg(palette.dim)(`· ${remaining}s`)}`;
+        return;
+      }
+      if (statusState.idle) {
+        const liveCount = sessions.filter(isLive).length;
+        const summary =
+          liveCount > 0
+            ? `${liveCount} live ${liveCount === 1 ? "session" : "sessions"}`
+            : "watching for sessions";
+        const glyph = liveCount > 0 ? spinnerFrame(animationTick) : "·";
+        const refreshed =
+          lastRefreshAt > 0 ? ` · refreshed ${formatSecondsAgo(lastRefreshAt, now)}` : "";
+        statusLine.content = t`${fg(liveCount > 0 ? palette.success : palette.dim)(glyph)} ${fg(palette.dim)(`${summary}${refreshed}`)}`;
+        return;
+      }
+      const busy = actionRunning && statusState.message.endsWith("…");
+      const color =
+        statusState.kind === "error"
+          ? palette.danger
+          : statusState.kind === "warning"
+            ? palette.warning
+            : statusState.kind === "success"
+              ? palette.success
+              : palette.accent;
+      const glyph = busy
+        ? spinnerFrame(animationTick)
+        : statusGlyphForKind(statusState.kind);
+      const textColor =
+        statusState.kind === "error" || statusState.kind === "warning"
+          ? color
+          : palette.text;
+      statusLine.content = t`${bold(fg(color)(glyph))} ${fg(textColor)(statusState.message)}`;
+    }
+
+    function formatSecondsAgo(timestamp: number, now: number): string {
+      const seconds = Math.max(0, Math.floor((now - timestamp) / 1000));
+      if (seconds < 1) return "just now";
+      if (seconds < 60) return `${seconds}s ago`;
+      return `${Math.floor(seconds / 60)}m ago`;
+    }
+
+    function sessionIsWorking(session: Session | undefined): boolean {
+      return session?.status === "active" || session?.status === "starting";
+    }
+
+    function updateWorkingIndicator(): void {
+      const session = selectedSession();
+      if (!sessionIsWorking(session)) {
+        workingIndicator.content = "";
+        return;
+      }
+      const verb = session!.status === "starting" ? "starting" : "working";
+      const elapsed = formatElapsed(session!.startedAt, undefined);
+      workingIndicator.fg =
+        session!.status === "starting" ? palette.warning : palette.success;
+      workingIndicator.content = `${spinnerFrame(animationTick)} ${verb} · ${elapsed}`;
+    }
+
+    // One cheap ticker drives every animation; each pass only touches the
+    // renderables that are actually animating so idle frames stay idle.
+    function animate(): void {
+      if (destroyed) return;
+      animationTick++;
+      const session = selectedSession();
+      const anyLive = sessions.some(isLive);
+      const working = sessionIsWorking(session);
+      const armed = view.interruptArmedUntil > Date.now();
+      if (anyLive) sessionList.requestRender();
+      if (working) {
+        updateWorkingIndicator();
+        const liveIndex = artifactRows.findIndex((row) => row.live);
+        if (liveIndex >= 0) refreshArtifactRow(liveIndex);
+      }
+      if (
+        statusState.idle ||
+        armed ||
+        (actionRunning && statusState.message.endsWith("…"))
+      )
+        renderStatus();
+      if (animationTick % 10 === 0 && working) updateDetails();
     }
 
     let resolveDone: (() => void) | undefined;
@@ -2467,6 +2963,7 @@ async function main(): Promise<void> {
     });
     let shutdownPromise: Promise<void> | undefined;
     const refreshTimer = setInterval(() => void refresh(), args.interval);
+    const animationTimer = setInterval(animate, ANIMATION_INTERVAL_MS);
     const signalNames: NodeJS.Signals[] = [
       "SIGINT",
       "SIGTERM",
@@ -2479,6 +2976,9 @@ async function main(): Promise<void> {
       if (shutdownPromise) return shutdownPromise;
       shutdownPromise = (async () => {
         clearInterval(refreshTimer);
+        clearInterval(animationTimer);
+        if (statusTimer) clearTimeout(statusTimer);
+        if (diffNavigationTimer) clearTimeout(diffNavigationTimer);
         for (const signal of signalNames) process.off(signal, shutdown);
         await refreshGate.stop();
         if (!destroyed) {
