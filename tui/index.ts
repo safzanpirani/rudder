@@ -33,6 +33,7 @@ import {
   filterPaletteCommands,
   formatElapsed,
   highlightCode,
+  highlightLines,
   nextDiffPollDelay,
   parseMarkdown,
   renderMeter,
@@ -93,6 +94,7 @@ import {
   type Session,
   type ToolEventDetail,
   type TraceActivity,
+  type CodeSpan,
   type CodeToken,
   type GitDiffFileStats,
   type InlineSpan,
@@ -357,6 +359,9 @@ async function main(): Promise<void> {
     let diffGutterWidth = 2;
     let diffError: string | undefined;
     let diffTouchedPaths = new Set<string>();
+    // Highlight spans per parsed diff line, scanned hunk by hunk so block
+    // comments and template strings keep their color across lines.
+    let diffSpans: Array<CodeSpan[] | undefined> = [];
     let diffTouchedSignature = "";
     let diffTreeRatio: number | undefined = persistedConfig.diffTreeRatio;
     // Typewriter reveal for the newest agent message while a session works.
@@ -2818,6 +2823,7 @@ async function main(): Promise<void> {
         diffSummary = gitDiffSummary(diffLines);
         diffFileStats = gitDiffFileStats(diffLines);
         diffGutterWidth = gitDiffGutterWidth(diffLines);
+        diffSpans = highlightDiffLines(diffLines);
         diffError =
           diffResult?.error ??
           (session.cwd ? undefined : "This session has no working directory.");
@@ -2838,6 +2844,28 @@ async function main(): Promise<void> {
       }
     }
 
+
+    function highlightDiffLines(lines: readonly GitDiffLine[]): Array<CodeSpan[] | undefined> {
+      const result: Array<CodeSpan[] | undefined> = new Array(lines.length);
+      let hunkStart = -1;
+      const flush = (end: number) => {
+        if (hunkStart < 0) return;
+        const filetype = filetypeForPath(lines[hunkStart].path);
+        const contentLines = lines.slice(hunkStart, end).map((line) => line.text.slice(1));
+        const spans = highlightLines(contentLines, filetype);
+        for (const [offset, lineSpans] of spans.entries()) result[hunkStart + offset] = lineSpans;
+        hunkStart = -1;
+      };
+      for (const [index, line] of lines.entries()) {
+        const isContent =
+          line.kind === "addition" || line.kind === "deletion" || line.kind === "context";
+        if (isContent) {
+          if (hunkStart < 0) hunkStart = index;
+        } else flush(index);
+      }
+      flush(lines.length);
+      return result;
+    }
 
     function buildDiffRows(): ActivityRow[] {
       if (diffLines.length === 0) {
@@ -3211,9 +3239,9 @@ async function main(): Promise<void> {
       return new StyledText([
         ...t`${bg(gutterBg)(fg(markerColor)(markerText))}${bg(gutterBg)(fg(palette.dim)(gutter))}${bg(lineBg)(bold(fg(signColor)(sign)))}`
           .chunks,
-        ...codeChunks(
-          content,
-          filetypeForPath(diff.path),
+        ...spanChunks(
+          (row.lineIndex !== undefined ? diffSpans[row.lineIndex] : undefined) ??
+            highlightCode(content, filetypeForPath(diff.path)),
           diff.kind === "context",
           lineBg,
         ),
@@ -3671,23 +3699,70 @@ async function main(): Promise<void> {
 }
 
 function tokenColor(token: CodeToken, muted: boolean): string {
-  const base =
-    token === "keyword"
-      ? palette.accent
-      : token === "string"
-        ? palette.success
-        : token === "number"
-          ? palette.warning
-          : token === "comment"
-            ? palette.dim
-            : token === "type"
-              ? blendHex(palette.text, palette.warning, 0.45)
-              : token === "punctuation"
-                ? blendHex(palette.text, palette.dim, 0.5)
-                : token === "property"
-                  ? blendHex(palette.text, palette.accent, 0.35)
-                  : palette.text;
+  let base: string;
+  switch (token) {
+    case "keyword":
+      base = palette.accent;
+      break;
+    case "string":
+      base = palette.success;
+      break;
+    case "regex":
+      base = blendHex(palette.success, palette.warning, 0.4);
+      break;
+    case "number":
+    case "constant":
+      base = palette.warning;
+      break;
+    case "comment":
+      base = palette.dim;
+      break;
+    case "type":
+      base = blendHex(palette.text, palette.warning, 0.45);
+      break;
+    case "function":
+      base = blendHex(palette.text, palette.accent, 0.55);
+      break;
+    case "tag":
+      base = palette.danger;
+      break;
+    case "attribute":
+      base = blendHex(palette.warning, palette.text, 0.35);
+      break;
+    case "property":
+      base = blendHex(palette.text, palette.accent, 0.35);
+      break;
+    case "operator":
+      base = blendHex(palette.text, palette.danger, 0.3);
+      break;
+    case "punctuation":
+      base = blendHex(palette.text, palette.dim, 0.5);
+      break;
+    case "heading":
+      base = palette.accent;
+      break;
+    default:
+      base = palette.text;
+  }
   return muted ? blendHex(base, palette.dim, 0.55) : base;
+}
+
+function spanChunks(
+  spans: readonly CodeSpan[],
+  muted: boolean,
+  rowBg?: string,
+): StyledText["chunks"] {
+  const chunks: StyledText["chunks"] = [];
+  for (const span of spans) {
+    let chunk = fg(tokenColor(span.token, muted))(span.text);
+    if (span.token === "comment") chunk = italic(chunk);
+    else if (span.token === "keyword" || span.token === "function" || span.token === "heading")
+      chunk = bold(chunk);
+    else if (span.token === "attribute") chunk = italic(chunk);
+    if (rowBg) chunk = bg(rowBg)(chunk);
+    chunks.push(...t`${chunk}`.chunks);
+  }
+  return chunks;
 }
 
 function codeChunks(
@@ -3696,16 +3771,7 @@ function codeChunks(
   muted: boolean,
   rowBg?: string,
 ): StyledText["chunks"] {
-  const chunks: StyledText["chunks"] = [];
-  for (const span of highlightCode(line, filetype)) {
-    let chunk = fg(tokenColor(span.token, muted))(span.text);
-    if (span.token === "comment") chunk = italic(chunk);
-    else if (span.token === "keyword" || span.token === "function")
-      chunk = bold(chunk);
-    if (rowBg) chunk = bg(rowBg)(chunk);
-    chunks.push(...t`${chunk}`.chunks);
-  }
-  return chunks;
+  return spanChunks(highlightCode(line, filetype), muted, rowBg);
 }
 
 // SelectRenderable only scrolls to follow its selection; wheel scrolling has
@@ -3858,8 +3924,26 @@ function renderMarkdownLine(line: MarkdownLine): StyledText["chunks"] {
 function renderMarkdown(text: string): StyledText["chunks"] {
   const lines = parseMarkdown(text);
   const chunks: StyledText["chunks"] = [];
+  let block: { start: number; language: string } | undefined;
+  let blockSpans: CodeSpan[][] = [];
   for (const [index, line] of lines.entries()) {
     if (index > 0) chunks.push(...t`\n`.chunks);
+    if (line.kind === "code") {
+      if (!block || block.language !== (line.language ?? "plain")) {
+        block = { start: index, language: line.language ?? "plain" };
+        const run: string[] = [];
+        for (let cursor = index; cursor < lines.length && lines[cursor].kind === "code"; cursor++)
+          run.push(lines[cursor].spans.map((span) => span.text).join(""));
+        blockSpans = highlightLines(run, block.language);
+      }
+      chunks.push(
+        ...t`${bg(palette.panel)("  ")}`.chunks,
+        ...spanChunks(blockSpans[index - block.start] ?? [], false, palette.panel),
+        ...t`${bg(palette.panel)(" ")}`.chunks,
+      );
+      continue;
+    }
+    block = undefined;
     chunks.push(...renderMarkdownLine(line));
   }
   return chunks;

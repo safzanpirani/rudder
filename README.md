@@ -335,8 +335,11 @@ divider beside the tree to reveal long paths or give the patch more room; Rudder
 remembers that width across launches. File status letters distinguish modified,
 added, deleted, and renamed paths. The patch shows old and new line numbers in
 a gutter, tints added and deleted lines, and renders each file as a banner with
-its status and line counts. Patch lines get lightweight syntax coloring by
-file extension, and files the selected session edited since it started carry
+its status and line counts. Patch lines get syntax coloring by file extension
+from a dependency-free scanner that tracks block comments and multi-line
+strings across a hunk and understands JSX and HTML tags, decorators, regex
+literals, constants, and CSS, SQL, and Markdown; fenced code in Chat uses the
+same scanner. Files the selected session edited since it started carry
 a `●` marker in the banner and the tree. Use `]c` and `[c` to move between hunks, or
 `]f` and `[f` to move between files. Enter, Space, or `z` folds and unfolds the
 file under the cursor (clicking a file banner does the same), and `Z` folds or

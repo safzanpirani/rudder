@@ -48,6 +48,9 @@ import {
   filetypeForPath,
   filterPaletteCommands,
   highlightCode,
+  highlightLine,
+  highlightLines,
+  INITIAL_HIGHLIGHT_STATE,
   nextDiffPollDelay,
   parseInline,
   parseMarkdown,
@@ -479,19 +482,19 @@ describe("artifact and display helpers", () => {
     expect(statusTimeoutMs("error")).toBeGreaterThan(statusTimeoutMs("success"));
   });
 
-  test("tokenizes code lines by language without leaving the line", () => {
+  test("tokenizes code lines by language", () => {
     expect(filetypeForPath("src/app.tsx")).toBe("typescript");
     expect(filetypeForPath("main.go")).toBe("go");
     expect(filetypeForPath("Dockerfile")).toBe("shell");
     expect(filetypeForPath("notes.txt")).toBe("plain");
     expect(filetypeForPath(undefined)).toBe("plain");
-    expect(filetypeForFence("```".slice(3) + "tsx")).toBe("typescript");
+    expect(filetypeForFence("tsx")).toBe("typescript");
     expect(filetypeForFence("bash title=x")).toBe("shell");
     expect(filetypeForFence("")).toBe("plain");
     expect(highlightCode('const x = "hi"; // note', "typescript")).toEqual([
       { text: "const", token: "keyword" },
       { text: " x ", token: "plain" },
-      { text: "=", token: "punctuation" },
+      { text: "=", token: "operator" },
       { text: " ", token: "plain" },
       { text: '"hi"', token: "string" },
       { text: ";", token: "punctuation" },
@@ -506,16 +509,31 @@ describe("artifact and display helpers", () => {
       "number",
       "punctuation",
     ]);
+    expect(highlightCode("func Run(ctx context.Context) error {", "go").map((span) => [span.text, span.token])).toEqual([
+      ["func", "keyword"],
+      [" ", "plain"],
+      ["Run", "function"],
+      ["(", "punctuation"],
+      ["ctx context", "plain"],
+      [".", "punctuation"],
+      ["Context", "type"],
+      [")", "punctuation"],
+      [" ", "plain"],
+      ["error", "type"],
+      [" ", "plain"],
+      ["{", "punctuation"],
+    ]);
     expect(highlightCode("def run(self): # go", "python").map((span) => span.token)).toContain("comment");
-    expect(highlightCode("echo $HOME # c", "shell").map((span) => span.token)).toEqual([
-      "keyword",
-      "plain",
-      "comment",
+    expect(highlightCode("echo $HOME # c", "shell").map((span) => [span.text, span.token])).toEqual([
+      ["echo ", "plain"],
+      ["$HOME", "property"],
+      [" ", "plain"],
+      ["# c", "comment"],
     ]);
     expect(highlightCode('{"key": 1}', "json").map((span) => span.token)).toEqual([
       "punctuation",
       "property",
-      "punctuation",
+      "operator",
       "plain",
       "number",
       "punctuation",
@@ -527,6 +545,104 @@ describe("artifact and display helpers", () => {
       "punctuation",
       "property",
     ]);
+  });
+
+  test("recognizes literals, markup, and decorators the old scanner missed", () => {
+    const tokensOf = (line: string, filetype: string) =>
+      highlightCode(line, filetype)
+        .filter((span) => span.text.trim())
+        .map((span) => [span.text.trim(), span.token]);
+    expect(tokensOf("const re = /ab+c/gi.test(s)", "typescript")).toContainEqual(["/ab+c/gi", "regex"]);
+    expect(tokensOf("const n = a / b / c", "typescript").filter(([, token]) => token === "regex")).toEqual([]);
+    expect(tokensOf("return <Card title=\"x\" onClick={go}>", "typescript")).toEqual([
+      ["return", "keyword"],
+      ["<", "punctuation"],
+      ["Card", "tag"],
+      ["title", "attribute"],
+      ["=", "operator"],
+      ['"x"', "string"],
+      ["onClick", "attribute"],
+      ["=", "operator"],
+      ["{", "punctuation"],
+      ["go", "plain"],
+      ["}>", "punctuation"],
+    ]);
+    expect(tokensOf("if (a < b) {", "typescript")).not.toContainEqual(["b", "tag"]);
+    expect(tokensOf("`hi ${name}!`", "typescript")).toEqual([
+      ["`hi", "string"],
+      ["${", "punctuation"],
+      ["name", "plain"],
+      ["}", "punctuation"],
+      ["!`", "string"],
+    ]);
+    expect(tokensOf("@Injectable() class Svc {}", "typescript")[0]).toEqual(["@Injectable", "attribute"]);
+    expect(tokensOf("#[derive(Debug)] struct Point;", "rust")).toEqual([
+      ["#[derive(Debug)]", "attribute"],
+      ["struct", "keyword"],
+      ["Point", "type"],
+      [";", "punctuation"],
+    ]);
+    expect(tokensOf("MAX_RETRIES = 3", "python")[0]).toEqual(["MAX_RETRIES", "constant"]);
+    expect(tokensOf("x = None", "python")).toContainEqual(["None", "constant"]);
+    expect(tokensOf("SELECT id FROM users WHERE active = true", "sql")).toEqual([
+      ["SELECT", "keyword"],
+      ["id", "plain"],
+      ["FROM", "keyword"],
+      ["users", "plain"],
+      ["WHERE", "keyword"],
+      ["active", "plain"],
+      ["=", "operator"],
+      ["true", "constant"],
+    ]);
+    expect(tokensOf(".card { color: #fff; }", "css")).toEqual([
+      [".card", "tag"],
+      ["{", "punctuation"],
+      ["color", "property"],
+      [":", "operator"],
+      ["#fff", "number"],
+      [";", "punctuation"],
+      ["}", "punctuation"],
+    ]);
+    expect(tokensOf('<a href="/x">hi</a>', "html")).toEqual([
+      ["<", "punctuation"],
+      ["a", "tag"],
+      ["href", "attribute"],
+      ["=", "operator"],
+      ['"/x"', "string"],
+      [">", "punctuation"],
+      ["hi", "plain"],
+      ["</", "punctuation"],
+      ["a", "tag"],
+      [">", "punctuation"],
+    ]);
+    expect(tokensOf("## Title", "markdown")).toEqual([["## Title", "heading"]]);
+    expect(tokensOf("- use `x` now", "markdown")).toEqual([
+      ["-", "keyword"],
+      ["use", "plain"],
+      ["`x`", "string"],
+      ["now", "plain"],
+    ]);
+  });
+
+  test("carries block comments and multi-line strings across lines", () => {
+    const spans = highlightLines(
+      ["const a = 1; /* start", "still comment", "end */ const b = 2;"],
+      "typescript",
+    );
+    expect(spans[1]).toEqual([{ text: "still comment", token: "comment" }]);
+    expect(spans[2][0]).toEqual({ text: "end */", token: "comment" });
+    expect(spans[2].map((span) => span.token)).toContain("keyword");
+    const python = highlightLines(['x = """doc', "more", 'done"""', "y = 1"], "python");
+    expect(python[1]).toEqual([{ text: "more", token: "string" }]);
+    expect(python[2][0]).toEqual({ text: 'done"""', token: "string" });
+    expect(python[3].map((span) => span.token)).toContain("number");
+    const template = highlightLines(["const s = `line one", "line two`;"], "typescript");
+    expect(template[1][0].token).toBe("string");
+    // State never leaks across an independent call.
+    expect(highlightCode("still comment", "typescript")).toEqual([{ text: "still comment", token: "plain" }]);
+    const state = highlightLine("/* open", "go");
+    expect(state.state.mode).toBe("block-comment");
+    expect(highlightLine("closed */ x", "go", state.state).state).toEqual(INITIAL_HIGHLIGHT_STATE);
   });
 
   test("parses markdown blocks and inline emphasis for chat rendering", () => {
