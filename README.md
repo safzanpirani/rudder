@@ -285,12 +285,13 @@ once, then launch the dashboard from any directory:
 rudder tui
 ```
 
-The dashboard shows live runs first, followed by the 20 most recent finished
-runs from Rudder's private global registry. It also discovers `state.json` files
-below `.scratch` in the directory where it was launched. New `rudder run`
-commands register themselves automatically. Use `--all` for the full history,
-or point it at extra locations with repeatable `--root DIR` and `--state-dir DIR`
-arguments:
+The dashboard shows live runs first, followed by every finished run from
+Rudder's private global registry, newest first. It also discovers `state.json`
+files below `.scratch` in the directory where it was launched. New `rudder run`
+commands register themselves automatically. Scroll the list with the mouse
+wheel or filter it with `/`. Point it at extra locations with repeatable
+`--root DIR` and `--state-dir DIR` arguments (`--all` is still accepted and has
+no effect):
 
 ```bash
 ./rudder tui --root /path/to/project/.scratch

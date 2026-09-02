@@ -418,7 +418,8 @@ export function parseArguments(
   const stateDirs: string[] = [];
   let rudder = "";
   let interval = 500;
-  let includeAll = false;
+  // Every registered run stays listed; --all remains accepted for scripts.
+  let includeAll = true;
   let theme: string | undefined;
   let beta = environment.RUDDER_TUI_BETA === "1";
   for (let index = 0; index < argv.length; index++) {

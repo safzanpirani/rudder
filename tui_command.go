@@ -59,9 +59,9 @@ func printTUIUsage() {
 Usage:
   %s tui [--root DIR]... [--state-dir DIR]... [--all] [--interval 500ms] [--theme NAME] [--beta]
 
-Shows live runs first, then the 20 most recent finished runs from the global
-registry plus .scratch below the current directory. --root and --state-dir may
-be repeated; --all includes the full history.
+Shows live runs first, then every finished run from the global registry plus
+.scratch below the current directory. --root and --state-dir may be repeated;
+--all is accepted for compatibility and has no effect.
 The refresh interval accepts milliseconds or seconds and must be at least 100ms.
 Press t inside the TUI to preview and save a theme. --theme overrides the saved
 theme for one launch; RUDDER_TUI_THEME provides the same environment override.
