@@ -27,6 +27,7 @@ import {
   blendHex,
   clampScrollOffset,
   contextMeter,
+  deleteSessionArtifacts,
   diffTreeWidthForRatio,
   filetypeForPath,
   filterPaletteCommands,
@@ -76,6 +77,7 @@ import {
   resolvePromptTarget,
   sessionDescription,
   sessionDetails,
+  sessionIsDeletable,
   sessionLabel,
   sessionsPanelTitle,
   statusGlyph,
@@ -888,6 +890,93 @@ async function main(): Promise<void> {
     let paletteOpen = false;
     let paletteCommands: PaletteCommand[] = [];
 
+    // Right-click context menu. Items are plain closures; a destructive item
+    // swaps the menu for a confirm/cancel pair instead of acting at once.
+    interface MenuItem {
+      label: string;
+      hint?: string;
+      danger?: boolean;
+      run: () => void | Promise<void>;
+    }
+    const contextList = new SelectRenderable(renderer, {
+      id: "context-menu",
+      width: "100%",
+      flexGrow: 1,
+      options: [],
+      showDescription: true,
+      wrapSelection: true,
+      backgroundColor: palette.panel,
+      focusedBackgroundColor: palette.panel,
+      textColor: palette.text,
+      focusedTextColor: palette.text,
+      descriptionColor: palette.dim,
+      selectedDescriptionColor: palette.text,
+      selectedBackgroundColor: palette.selected,
+      selectedTextColor: palette.accent,
+      showScrollIndicator: false,
+    });
+    const contextPanel = new BoxRenderable(renderer, {
+      id: "context-panel",
+      position: "absolute",
+      left: 0,
+      top: 0,
+      width: 44,
+      height: 6,
+      zIndex: 30,
+      border: true,
+      borderStyle: "rounded",
+      borderColor: palette.accent,
+      backgroundColor: palette.panel,
+      visible: false,
+    });
+    contextPanel.add(contextList);
+    let contextItems: MenuItem[] = [];
+    let contextOpen = false;
+    let contextOpenedAt = 0;
+
+    function openContextMenu(items: MenuItem[], x: number, y: number, title = ""): void {
+      if (items.length === 0) return;
+      contextItems = items;
+      const width = Math.min(
+        renderer.width - 2,
+        Math.max(28, ...items.map((item) => Math.max(item.label.length, (item.hint ?? "").length) + 6)),
+      );
+      const height = Math.min(renderer.height - 2, items.length * 2 + 2);
+      contextPanel.width = width;
+      contextPanel.height = height;
+      contextPanel.left = Math.max(0, Math.min(x, renderer.width - width - 1));
+      contextPanel.top = Math.max(0, Math.min(y, renderer.height - height - 1));
+      contextPanel.title = title ? ` ${title} ` : "";
+      contextList.options = items.map((item, index) => ({
+        name: item.danger ? `⚠ ${item.label}` : item.label,
+        description: item.hint ?? "",
+        value: String(index),
+      }));
+      contextList.setSelectedIndex(0);
+      contextOpen = true;
+      contextOpenedAt = Date.now();
+      contextPanel.visible = true;
+      contextList.focus();
+    }
+
+    function closeContextMenu(): void {
+      if (!contextOpen) return;
+      contextOpen = false;
+      contextPanel.visible = false;
+      focusCurrentPanel();
+    }
+
+    function runContextItem(index = contextList.getSelectedIndex()): void {
+      const item = contextItems[index];
+      closeContextMenu();
+      if (item) void item.run();
+    }
+    contextPanel.onMouseDown = (event) => {
+      const clicked = Math.floor((event.y - contextPanel.y - 1) / 2);
+      if (clicked >= 0 && clicked < contextItems.length) runContextItem(clicked);
+      event.preventDefault();
+    };
+
     const modelPicker = new SelectRenderable(renderer, {
       id: "model-picker",
       width: "100%",
@@ -1010,10 +1099,22 @@ async function main(): Promise<void> {
     if (layout === "beta") root.add(sessionsPanel);
     root.add(searchPanel);
     root.add(palettePanel);
+    root.add(contextPanel);
     root.add(themePanel);
     root.add(modelPanel);
     root.add(dejaPanel);
     renderer.root.add(root);
+    // Mouse events bubble here last; a click anywhere outside the open menu
+    // dismisses it. The opening click itself bubbles too, hence the delay.
+    root.onMouseDown = (event) => {
+      if (!contextOpen || Date.now() - contextOpenedAt < 150) return;
+      const inside =
+        event.x >= contextPanel.x &&
+        event.x < contextPanel.x + contextPanel.width &&
+        event.y >= contextPanel.y &&
+        event.y < contextPanel.y + contextPanel.height;
+      if (!inside) closeContextMenu();
+    };
     artifactScroll.focus();
     view = { ...view, focus: "artifact" };
 
@@ -1052,7 +1153,130 @@ async function main(): Promise<void> {
         scrollOffset + Math.floor((event.y - sessionList.y) / linesPerItem);
       if (clickedIndex >= 0 && clickedIndex < sessions.length)
         sessionList.setSelectedIndex(clickedIndex);
+      if (event.button === 2) {
+        event.preventDefault();
+        const session = sessions[clickedIndex];
+        if (session) openContextMenu(sessionMenu(session), event.x, event.y, sessionMenuTitle(session));
+      }
     };
+
+    function sessionMenuTitle(session: Session): string {
+      return sessionLabel(session).split("  ")[0]?.trim() ?? "session";
+    }
+
+    function sessionMenu(session: Session): MenuItem[] {
+      const items: MenuItem[] = [];
+      const target = promptTargetForSession(session);
+      if (target)
+        items.push({
+          label:
+            target.route === "steer"
+              ? "Steer running turn"
+              : target.route === "prompt"
+                ? "Send a prompt"
+                : "Continue thread in a new run",
+          run: () => openPrompt(target.route === "continue" ? "continue" : "auto"),
+        });
+      if (session.status === "active" || session.status === "idle")
+        items.push({
+          label: session.status === "idle" ? "End idle session" : "Interrupt turn",
+          hint: "asks once more before acting",
+          run: () => requestInterrupt(),
+        });
+      items.push(
+        { label: "Open chat", run: () => setArtifact("chat") },
+        { label: "Open diff", run: () => setArtifact("diff") },
+      );
+      if (session.threadId)
+        items.push({
+          label: "Copy thread ID",
+          hint: session.threadId,
+          run: () => copyText(session.threadId!),
+        });
+      items.push({
+        label: "Copy state directory",
+        hint: session.stateDir,
+        run: () => copyText(session.stateDir),
+      });
+      if (sessionIsDeletable(session))
+        items.push({
+          label: "Delete session…",
+          hint: "removes its state directory and registry entry",
+          danger: true,
+          run: () => confirmDelete([session], `Delete ${sessionMenuTitle(session)}?`),
+        });
+      const filtered = sessions.filter(sessionIsDeletable);
+      if (sessionQuery.trim() && filtered.length > 1)
+        items.push({
+          label: `Delete ${filtered.length} finished sessions matching "${sessionQuery.trim()}"…`,
+          hint: "live sessions in the filter are kept",
+          danger: true,
+          run: () => confirmDelete(filtered, `Delete ${filtered.length} sessions matching "${sessionQuery.trim()}"?`),
+        });
+      const broken = listedSessions.filter(
+        (candidate) => candidate.status === "failed" || candidate.status === "stale",
+      );
+      if (broken.length > 0)
+        items.push({
+          label: `Delete all ${broken.length} failed or stale sessions…`,
+          danger: true,
+          run: () => confirmDelete(broken, `Delete ${broken.length} failed or stale sessions?`),
+        });
+      return items;
+    }
+
+    function confirmDelete(targets: Session[], question: string): void {
+      const x = contextPanel.left as number;
+      const y = contextPanel.top as number;
+      openContextMenu(
+        [
+          {
+            label: `Yes, delete ${targets.length === 1 ? "it" : `${targets.length} sessions`}`,
+            hint: "cannot be undone",
+            danger: true,
+            run: () => deleteSessions(targets),
+          },
+          { label: "Cancel", run: () => undefined },
+        ],
+        x,
+        y,
+        question,
+      );
+    }
+
+    async function deleteSessions(targets: Session[]): Promise<void> {
+      if (actionRunning) return;
+      actionRunning = true;
+      setStatus(`Deleting ${targets.length} ${targets.length === 1 ? "session" : "sessions"}…`);
+      let removed = 0;
+      const failures: string[] = [];
+      for (const target of targets) {
+        try {
+          const result = await deleteSessionArtifacts(target);
+          if (result.removedStateDir || result.removedRegistryEntries > 0) removed++;
+          else failures.push(`${sessionMenuTitle(target)}: state file did not match`);
+          const explicit = args.stateDirs.indexOf(target.stateDir);
+          if (explicit >= 0) args.stateDirs.splice(explicit, 1);
+        } catch (error) {
+          failures.push(`${sessionMenuTitle(target)}: ${errorMessage(error)}`);
+        }
+      }
+      actionRunning = false;
+      if (targets.some((target) => target.stateDir === view.selectedStateDir))
+        view = reduceView(view, { type: "select", stateDir: undefined });
+      await refresh();
+      if (failures.length > 0)
+        setStatus(`Deleted ${removed}; ${failures[0]}${failures.length > 1 ? ` (+${failures.length - 1} more)` : ""}`, "warning");
+      else setStatus(`Deleted ${removed} ${removed === 1 ? "session" : "sessions"}`, "success");
+    }
+
+    function copyText(value: string): void {
+      const copied = renderer.copyToClipboardOSC52(value);
+      setStatus(
+        copied ? "Copied to clipboard" : "Terminal clipboard copy is unavailable",
+        copied ? "success" : "error",
+      );
+    }
     artifactPanel.onMouseDown = () => focusArtifact();
     artifactScroll.onMouseScroll = () => {
       focusArtifact();
@@ -1278,6 +1502,15 @@ async function main(): Promise<void> {
         key.preventDefault();
         key.stopPropagation();
         void shutdown();
+        return;
+      }
+      if (contextOpen) {
+        key.preventDefault();
+        key.stopPropagation();
+        if (key.name === "escape" || key.name === "q") closeContextMenu();
+        else if (key.name === "return" || key.name === "enter") runContextItem();
+        else if (key.name === "up" || key.name === "k") contextList.moveUp(1);
+        else if (key.name === "down" || key.name === "j") contextList.moveDown(1);
         return;
       }
       if (paletteOpen) {
@@ -1624,6 +1857,17 @@ async function main(): Promise<void> {
       promptInput.textColor = palette.text;
       promptInput.focusedTextColor = palette.text;
       promptInput.placeholderColor = palette.dim;
+      contextPanel.backgroundColor = palette.panel;
+      contextPanel.borderColor = palette.accent;
+      contextPanel.titleColor = palette.accent;
+      contextList.backgroundColor = palette.panel;
+      contextList.focusedBackgroundColor = palette.panel;
+      contextList.textColor = palette.text;
+      contextList.focusedTextColor = palette.text;
+      contextList.descriptionColor = palette.dim;
+      contextList.selectedDescriptionColor = palette.text;
+      contextList.selectedBackgroundColor = palette.selected;
+      contextList.selectedTextColor = palette.accent;
       palettePanel.backgroundColor = palette.background;
       palettePanel.borderColor = palette.accent;
       palettePanel.titleColor = palette.accent;
@@ -2643,6 +2887,36 @@ async function main(): Promise<void> {
         : [];
     }
 
+    function artifactRowMenu(row: ActivityRow): MenuItem[] {
+      const items: MenuItem[] = [];
+      if (row.copyText)
+        items.push({ label: "Copy row", run: () => copyText(row.copyText) });
+      if (row.diff?.path) {
+        const path = row.diff.path;
+        items.push(
+          {
+            label: collapsedDiffFiles.has(path) ? "Unfold file" : "Fold file",
+            hint: path,
+            run: () => toggleDiffFile(path),
+          },
+          {
+            label: collapsedDiffFiles.size < diffFileStats.size ? "Fold every file" : "Unfold every file",
+            run: () => toggleAllDiffFiles(),
+          },
+          { label: "Copy file path", hint: path, run: () => copyText(path) },
+        );
+      }
+      if (row.activity?.kind === "tool")
+        items.push({
+          label: expandedToolIDs.has(row.id) ? "Collapse tool" : "Expand tool",
+          run: () => toggleTool(row.id),
+        });
+      if (row.action) items.push({ label: "Run", run: row.action });
+      if (!artifactFollowing && view.artifact !== "diff")
+        items.push({ label: "Resume live follow", run: () => resumeFollowing() });
+      return items;
+    }
+
     function activateSelectedRow(): void {
       const row = artifactRows[selectedRow];
       if (!row) return;
@@ -2737,11 +3011,17 @@ async function main(): Promise<void> {
           // drag auto-scroll, which makes an ordinary click feel erratic.
           selectable: artifactAllowsTextSelection(view.artifact),
         });
-        renderable.onMouseDown = () => {
+        renderable.onMouseDown = (event) => {
           focusArtifact();
           const previousRow = selectedRow;
           selectedRow = index;
           refreshArtifactRow(previousRow);
+          if (event.button === 2) {
+            refreshArtifactRow(index);
+            event.preventDefault();
+            openContextMenu(artifactRowMenu(row), event.x, event.y);
+            return;
+          }
           if (row.action) row.action();
           else if (row.activity?.kind === "tool") toggleTool(row.id);
           else if (row.diff?.kind === "file" && row.diff.path)

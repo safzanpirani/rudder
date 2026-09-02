@@ -2161,3 +2161,60 @@ export function clampScrollOffset(
   const maximum = Math.max(0, itemCount - Math.max(1, visibleItems));
   return Math.max(0, Math.min(maximum, Math.round(offset)));
 }
+
+// ---------------------------------------------------------------------------
+// Session deletion. Only finished or stale runs may be removed, and only when
+// the directory really holds that run's state file.
+
+export function sessionIsDeletable(session: Pick<Session, "status">): boolean {
+  return isTerminalStatus(session.status) || session.status === "stale";
+}
+
+export interface DeleteSessionResult {
+  removedStateDir: boolean;
+  removedRegistryEntries: number;
+}
+
+export async function deleteSessionArtifacts(
+  session: Pick<Session, "stateDir" | "status">,
+  registryDirs: string[] = defaultRegistryDirectories(),
+): Promise<DeleteSessionResult> {
+  if (!sessionIsDeletable(session))
+    throw new Error(`Session is ${session.status}; stop it before deleting`);
+  const stateDir = resolve(session.stateDir);
+  const stateFile = join(stateDir, "state.json");
+  let persisted: { stateDir?: string } | undefined;
+  try {
+    persisted = JSON.parse(await readFile(stateFile, "utf8")) as { stateDir?: string };
+  } catch {
+    persisted = undefined;
+  }
+  const { rm } = await import("node:fs/promises");
+  let removedStateDir = false;
+  if (persisted?.stateDir && resolve(persisted.stateDir) === stateDir) {
+    await rm(stateDir, { recursive: true, force: true });
+    removedStateDir = true;
+  }
+  let removedRegistryEntries = 0;
+  for (const registryDir of registryDirs) {
+    let entries;
+    try {
+      entries = await readdir(registryDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".run")) continue;
+      const entryPath = join(registryDir, entry.name);
+      try {
+        const target = (await readFile(entryPath, "utf8")).trim();
+        if (resolve(target) !== stateDir) continue;
+        await rm(entryPath, { force: true });
+        removedRegistryEntries++;
+      } catch {
+        // Unreadable entries are left for the owner to inspect.
+      }
+    }
+  }
+  return { removedStateDir, removedRegistryEntries };
+}

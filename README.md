@@ -356,6 +356,13 @@ and fenced code with syntax coloring) and types out the newest message as it
 streams. Activity tool rows collapse to one line and expand into a card with
 the command, status, working directory, input, and output. Empty states are
 clickable: they start a session, open the prompt, or retry a failed diff read.
+Right-click a session for a context menu: prompt or steer it, stop it, open its
+chat or diff, copy its thread ID or state directory, and delete finished or
+stale sessions. With a `/` filter active the menu also offers to delete every
+finished session that matches, and it can clear all failed or stale sessions in
+one step. Deletion asks for confirmation, removes the run's state directory and
+registry entry, and never touches a live session. Right-click a patch or
+activity row to copy it, fold its file, or expand the tool.
 Press `:`, `?`, or `Ctrl+K` for the command palette, which lists every action
 with its key and filters as you type. The prompt accepts multiple lines:
 Enter sends, and Shift+Enter, Alt+Enter, or `Ctrl+J` insert a newline. The

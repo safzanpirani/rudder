@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -41,6 +41,8 @@ import {
   visibleGitDiffLineIndices,
   clampScrollOffset,
   contextMeter,
+  deleteSessionArtifacts,
+  sessionIsDeletable,
   diffTreeWidthForRatio,
   filetypeForFence,
   filetypeForPath,
@@ -597,6 +599,39 @@ describe("artifact and display helpers", () => {
     expect(typewriterReveal(0, 100, 24)).toBe(24);
     expect(typewriterReveal(90, 100, 24)).toBe(100);
     expect(typewriterReveal(120, 100)).toBe(100);
+  });
+
+  test("deletes finished session state and its registry entries only", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rudder-delete-"));
+    const stateDir = join(root, "runs", "done.run");
+    const registry = join(root, "registry");
+    const otherDir = join(root, "runs", "other.run");
+    await mkdir(stateDir, { recursive: true });
+    await mkdir(otherDir, { recursive: true });
+    await mkdir(registry, { recursive: true });
+    await writeFile(join(stateDir, "state.json"), JSON.stringify({ stateDir, pid: 1, status: "completed" }));
+    await writeFile(join(stateDir, "events.jsonl"), "{}\n");
+    await writeFile(join(otherDir, "state.json"), JSON.stringify({ stateDir: otherDir, pid: 1, status: "completed" }));
+    await writeFile(join(registry, "a.run"), `${stateDir}\n`);
+    await writeFile(join(registry, "b.run"), `${otherDir}\n`);
+    expect(sessionIsDeletable({ status: "active" })).toBe(false);
+    expect(sessionIsDeletable({ status: "stale" })).toBe(true);
+    await expect(
+      deleteSessionArtifacts({ stateDir, status: "active" }, [registry]),
+    ).rejects.toThrow("stop it before deleting");
+    const result = await deleteSessionArtifacts({ stateDir, status: "completed" }, [registry]);
+    expect(result).toEqual({ removedStateDir: true, removedRegistryEntries: 1 });
+    await expect(readFile(join(stateDir, "state.json"), "utf8")).rejects.toThrow();
+    expect(await readFile(join(otherDir, "state.json"), "utf8")).toContain("other.run");
+    expect(await readFile(join(registry, "b.run"), "utf8")).toContain("other.run");
+    await expect(readFile(join(registry, "a.run"), "utf8")).rejects.toThrow();
+    // A directory whose state file points elsewhere is never removed.
+    const decoy = join(root, "runs", "decoy.run");
+    await mkdir(decoy, { recursive: true });
+    await writeFile(join(decoy, "state.json"), JSON.stringify({ stateDir: otherDir, pid: 1, status: "failed" }));
+    const decoyResult = await deleteSessionArtifacts({ stateDir: decoy, status: "failed" }, [registry]);
+    expect(decoyResult.removedStateDir).toBe(false);
+    expect(await readFile(join(decoy, "state.json"), "utf8")).toContain("other.run");
   });
 
   test("clamps wheel scrolling of a list to its content", () => {
