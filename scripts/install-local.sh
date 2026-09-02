@@ -62,6 +62,8 @@ test "$source_hash" = "$installed_hash" || {
   exit 1
 }
 
+"$bin_dir/ruddr" skill install
+
 # Keep the pre-rename command working for existing shells and scripts.
 ln -sfn ruddr "$bin_dir/rudder"
 printf '%s\n' "installed $bin_dir/ruddr (and the rudder alias)"

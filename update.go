@@ -177,6 +177,13 @@ func replaceExecutable(ctx context.Context, executable, latest string) error {
 		return err
 	}
 	fmt.Printf("ruddr %s installed at %s\n", latest, executable)
+	// The new binary carries the current skill text.
+	refresh := exec.Command(executable, "skill", "install")
+	refresh.Stdout = os.Stdout
+	refresh.Stderr = os.Stderr
+	if err := refresh.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "ruddr: skill install after update failed: %v\n", err)
+	}
 	return nil
 }
 

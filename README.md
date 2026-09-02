@@ -693,9 +693,16 @@ Ground rules:
 agent skill that teaches a coding agent to hand a hard or long task to a
 steerable provider through Ruddr: build a self-contained
 brief, launch in the background, monitor, steer mid-turn, wait bounded, and
-verify the handoff. Install it by copying the directory into your agent's
-skills location (for Claude Code, `~/.claude/skills/` or the project's
-`.claude/skills/`).
+verify the handoff. The skill is embedded in the binary, and both the npm
+package and `scripts/install-local.sh` install it into `~/.claude/skills/` and
+`~/.agents/skills/` for you; `ruddr update` refreshes it. Run it yourself to
+reinstall it or to target another location:
+
+```bash
+ruddr skill install                      # ~/.claude/skills and ~/.agents/skills
+ruddr skill install --dir .claude/skills # this project only
+ruddr skill show                         # print the skill
+```
 
 ## Development
 

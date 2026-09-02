@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const version = "0.3.1"
+const version = "0.3.2"
 
 func main() {
 	ctx := context.Background()
@@ -62,6 +62,8 @@ func runCLIContext(ctx context.Context, args []string) error {
 		return waitCommand(args[1:])
 	case "update":
 		return updateCommand(args[1:])
+	case "skill":
+		return skillCommand(args[1:])
 	case "version", "--version", "-version":
 		fmt.Println("ruddr", version)
 		refreshUpdateCheck(ctx)
@@ -391,6 +393,7 @@ Usage:
   %[1]s interrupt --state-dir DIR
   %[1]s wait --state-dir DIR [--timeout 10m]
   %[1]s update [--check]                        (install the latest release)
+  %[1]s skill install [--dir DIR]               (install the ruddr-delegate agent skill)
   %[1]s version
 
 Ruddr checks GitHub for a newer release at most once a day and mentions it in
