@@ -122,6 +122,8 @@ and in the background of `ruddr tui`, and caches the answer under
 version` prints a notice, and the TUI shows a status toast, keeps the version
 in the idle status line, and offers **Update Ruddr** in the command palette.
 Set `RUDDR_NO_UPDATE_CHECK=1` to disable the check.
+Failed automatic checks also wait a day before retrying and retain the last
+known release. `ruddr update --check` always performs a fresh lookup.
 
 `ruddr update` picks the install channel from where the binary lives: a global
 npm or bun package is reinstalled at the new version through that tool, a

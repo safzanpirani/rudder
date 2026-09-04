@@ -93,12 +93,23 @@ func installDelegateSkill(dir string) (string, error) {
 	if existing, err := os.ReadFile(path); err == nil && string(existing) == delegateSkill {
 		return path, nil
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(delegateSkill), 0o644); err != nil {
+	tmp, err := os.CreateTemp(skillDir, ".SKILL.md-*")
+	if err != nil {
 		return "", err
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(delegateSkill); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
 		return "", err
 	}
 	return path, nil

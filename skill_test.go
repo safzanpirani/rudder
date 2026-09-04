@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -51,5 +52,36 @@ func TestSkillInstallCommandUsesDirFlags(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, "ruddr-delegate", "SKILL.md")); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestConcurrentSkillInstall(t *testing.T) {
+	dir := t.TempDir()
+	// A leftover temporary path from an older installer must not block installs.
+	legacy := filepath.Join(dir, delegateSkillName, "SKILL.md.tmp")
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := installDelegateSkill(dir); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	data, err := os.ReadFile(filepath.Join(dir, delegateSkillName, "SKILL.md"))
+	if err != nil || string(data) != delegateSkill {
+		t.Fatalf("content mismatch: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, delegateSkillName))
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("temporary files leaked: %v, %v", entries, err)
 	}
 }

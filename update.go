@@ -109,6 +109,9 @@ func runPackageManagerUpdate(tool string, args []string) error {
 func detectInstallChannel(executable string) installChannel {
 	dir := filepath.Dir(executable)
 	if isRuddrPackageRoot(dir) {
+		if _, err := os.Stat(filepath.Join(dir, "scripts", "install-local.sh")); err == nil {
+			return installChannel{Kind: "source"}
+		}
 		kind := "npm"
 		normalized := filepath.ToSlash(dir)
 		if strings.Contains(normalized, "/.bun/") {
@@ -265,7 +268,8 @@ func fetchLatestVersion(ctx context.Context) (string, error) {
 	}
 	request.Header.Set("User-Agent", "ruddr/"+version)
 	client := &http.Client{
-		Timeout: updateHTTPClient.Timeout,
+		Timeout:   updateHTTPClient.Timeout,
+		Transport: updateHTTPClient.Transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -362,7 +366,7 @@ func readUpdateCheck() (updateCheck, bool) {
 		return updateCheck{}, false
 	}
 	var check updateCheck
-	if json.Unmarshal(data, &check) != nil || check.Latest == "" {
+	if json.Unmarshal(data, &check) != nil || check.CheckedAt.IsZero() {
 		return updateCheck{}, false
 	}
 	return check, true
@@ -397,11 +401,12 @@ func availableUpdate() (string, bool) {
 
 func updateCheckIsStale() bool {
 	check, ok := readUpdateCheck()
-	return !ok || check.Current != version || time.Since(check.CheckedAt) > updateCheckInterval
+	age := time.Since(check.CheckedAt)
+	return !ok || check.Current != version || age < 0 || age > updateCheckInterval
 }
 
 // refreshUpdateCheck performs a bounded network lookup when the cached result
-// is older than a day. Failures are silent; the next command tries again.
+// is older than a day. Failed attempts also count toward the daily interval.
 func refreshUpdateCheck(ctx context.Context) {
 	if updateChecksDisabled() || !updateCheckIsStale() {
 		return
@@ -410,7 +415,9 @@ func refreshUpdateCheck(ctx context.Context) {
 	defer cancel()
 	latest, err := fetchLatestVersion(ctx)
 	if err != nil {
-		return
+		// Keep the last known release available during an outage.
+		previous, _ := readUpdateCheck()
+		latest = previous.Latest
 	}
 	_ = writeUpdateCheck(updateCheck{CheckedAt: time.Now(), Latest: latest, Current: version})
 }

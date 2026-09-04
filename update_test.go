@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -151,5 +154,62 @@ func writeFile(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDetectCheckoutInstallChannel(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "package.json"), `{"name":"ruddr"}`)
+	writeFile(t, filepath.Join(root, "scripts", "npm-binary.cjs"), "")
+	writeFile(t, filepath.Join(root, "scripts", "install-local.sh"), "")
+	if got := detectInstallChannel(filepath.Join(root, "ruddr")); got.Kind != "source" {
+		t.Fatalf("checkout detected as %+v", got)
+	}
+}
+
+type updateTestTransport func(*http.Request) (*http.Response, error)
+
+func (f updateTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestFailedUpdateCheckIsCached(t *testing.T) {
+	for _, latest := range []string{"", "99.0.0"} {
+		t.Run("previous="+latest, func(t *testing.T) {
+			t.Setenv(registryDirectoryEnvironment, filepath.Join(t.TempDir(), "runs"))
+			t.Setenv(updateCheckDisableEnvironment, "")
+			if latest != "" {
+				if err := writeUpdateCheck(updateCheck{CheckedAt: time.Now().Add(-48 * time.Hour), Latest: latest, Current: version}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			original := updateHTTPClient
+			t.Cleanup(func() { updateHTTPClient = original })
+			calls := 0
+			updateHTTPClient = &http.Client{Transport: updateTestTransport(func(*http.Request) (*http.Response, error) {
+				calls++
+				return nil, errors.New("offline")
+			})}
+			refreshUpdateCheck(context.Background())
+			refreshUpdateCheck(context.Background())
+			if calls != 1 {
+				t.Fatalf("made %d network calls, want 1", calls)
+			}
+			cached, ok := readUpdateCheck()
+			if !ok || cached.Latest != latest || updateCheckIsStale() {
+				t.Fatalf("unexpected cache: %+v, valid=%v", cached, ok)
+			}
+			if got, available := availableUpdate(); available != (latest != "") || got != latest {
+				t.Fatalf("availableUpdate = %q, %v", got, available)
+			}
+		})
+	}
+}
+
+func TestFutureUpdateCheckIsStale(t *testing.T) {
+	t.Setenv(registryDirectoryEnvironment, filepath.Join(t.TempDir(), "runs"))
+	if err := writeUpdateCheck(updateCheck{CheckedAt: time.Now().Add(48 * time.Hour), Current: version}); err != nil {
+		t.Fatal(err)
+	}
+	if !updateCheckIsStale() {
+		t.Fatal("future cache must not suppress update checks")
 	}
 }
