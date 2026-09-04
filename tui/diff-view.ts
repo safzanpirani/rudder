@@ -425,18 +425,25 @@ export function createDiffView(host: DiffHost): DiffView {
     result: { content: string; error?: string } | undefined,
     stillCurrent: () => boolean,
   ): Promise<boolean> {
-    lines = parseGitDiff(result?.content ?? "");
+    if (!stillCurrent()) return false;
+    const nextLines = parseGitDiff(result?.content ?? "");
+    const nextFileStats = gitDiffFileStats(nextLines);
+    const signature = `${session.stateDir}:${session.startedAt}:${[...nextFileStats.keys()].join("\0")}:${result?.content.length ?? 0}`;
+    let nextTouchedPaths = session.cwd ? touchedPaths : new Set<string>();
+    if (signature !== touchedSignature && session.cwd) {
+      nextTouchedPaths = await touchedSince(session.cwd, nextFileStats.keys(), session.startedAt);
+      if (!stillCurrent()) return false;
+    }
+    lines = nextLines;
     summary = gitDiffSummary(lines);
-    fileStats = gitDiffFileStats(lines);
+    fileStats = nextFileStats;
     gutterWidth = gitDiffGutterWidth(lines);
     spans = highlightDiffLines(lines);
     error = result?.error ?? (session.cwd ? undefined : "This session has no working directory.");
     for (const path of collapsedFiles) if (!fileStats.has(path)) collapsedFiles.delete(path);
-    const signature = `${session.stateDir}:${session.startedAt}:${[...fileStats.keys()].join(" ")}:${result?.content.length ?? 0}`;
-    if (signature !== touchedSignature && session.cwd) {
+    if (signature !== touchedSignature) {
       touchedSignature = signature;
-      touchedPaths = await touchedSince(session.cwd, fileStats.keys(), session.startedAt);
-      if (!stillCurrent()) return false;
+      touchedPaths = nextTouchedPaths;
       host.invalidateRows();
     }
     return true;

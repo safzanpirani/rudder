@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   artifactAllowsTextSelection,
   AsyncTaskGate,
+  LatestRead,
   attachToolDetails,
   discoverSessions,
   diffTreeWidthForPointer,
@@ -1424,5 +1425,33 @@ describe("promptable TUI helpers", () => {
     .map((line) => JSON.stringify(line))
     .join("\n");
   expect(parseChatTranscript(lines, "root").map((entry) => entry.text)).toEqual(["visible"]);
+  });
+});
+
+
+describe("artifact read lifecycle", () => {
+  test("a newer tab read wins even when the old read finishes last", async () => {
+    const reads = new LatestRead();
+    const oldRead = deferred();
+    let visible = "";
+    const render = async (tab: string, ready: Promise<void>) => {
+      const current = reads.begin();
+      await ready;
+      if (current()) visible = tab;
+    };
+    const old = render("diff", oldRead.promise);
+    await render("chat", Promise.resolve());
+    oldRead.resolve();
+    await old;
+    expect(visible).toBe("chat");
+  });
+
+  test("shutdown retires pending reads and rejects later reads", () => {
+    const reads = new LatestRead();
+    const current = reads.begin();
+    expect(current()).toBe(true);
+    reads.stop();
+    expect(current()).toBe(false);
+    expect(reads.begin()()).toBe(false);
   });
 });

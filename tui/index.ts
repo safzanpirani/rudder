@@ -28,6 +28,7 @@ import { join } from "node:path";
 import {
   artifactAllowsTextSelection,
   AsyncTaskGate,
+  LatestRead,
   attachToolDetails,
   contextMeter,
   deleteSessionArtifacts,
@@ -161,6 +162,7 @@ async function main(): Promise<void> {
     let sessions: Session[] = [];
     let view: ViewState = initialViewState;
     const refreshGate = new AsyncTaskGate();
+    const artifactReads = new LatestRead();
     let actionRunning = false;
     let detailsExpanded = false;
     let sessionQuery = "";
@@ -2242,7 +2244,12 @@ async function main(): Promise<void> {
     }
 
     async function updateSelectedSession(): Promise<void> {
+      if (destroyed || shutdownPromise) return;
+      const isLatestRead = artifactReads.begin();
+      const artifact = view.artifact;
       const session = selectedSession();
+      const readIsCurrent = () =>
+        isLatestRead() && artifact === view.artifact && session?.stateDir === view.selectedStateDir;
       updateDetails();
       if (!session) {
         setArtifactRows([
@@ -2255,13 +2262,13 @@ async function main(): Promise<void> {
         ]);
         return;
       }
-      const currentKey = `${session.stateDir}:${view.artifact}`;
+      const currentKey = `${session.stateDir}:${artifact}`;
       const forceDiff = artifactKey !== currentKey;
       if (artifactKey !== currentKey) {
         artifactKey = currentKey;
         artifactSignature = "";
         // The diff reads top-down; every other artifact tails its newest rows.
-        artifactFollowing = view.artifact !== "diff";
+        artifactFollowing = artifact !== "diff";
         artifactScroll.stickyScroll = artifactFollowing;
         if (!artifactFollowing) artifactScroll.scrollTo({ x: 0, y: 0 });
         unseenRows = 0;
@@ -2269,21 +2276,21 @@ async function main(): Promise<void> {
         selectedRow = -1;
       }
       const artifactPath =
-        view.artifact === "trace" ? session.tracePath : session.outputPath;
+        artifact === "trace" ? session.tracePath : session.outputPath;
       const diffResult =
-        view.artifact === "diff" && session.cwd
+        artifact === "diff" && session.cwd
           ? await readWorkspaceDiff(session.cwd, forceDiff)
           : undefined;
       const [content, eventContent] = await Promise.all([
-        view.artifact === "chat" || view.artifact === "diff"
+        artifact === "chat" || artifact === "diff"
           ? Promise.resolve("")
           : readTail(artifactPath, ARTIFACT_TAIL_BYTES),
-        view.artifact === "output" || view.artifact === "diff"
+        artifact === "output" || artifact === "diff"
           ? Promise.resolve("")
           : readTail(session.eventsPath, ARTIFACT_TAIL_BYTES),
       ]);
-      if (session.stateDir !== view.selectedStateDir) return;
-      if (view.artifact === "chat") {
+      if (!readIsCurrent()) return;
+      if (artifact === "chat") {
         const entries = parseChatTranscript(eventContent, session.threadId);
         const rows: ActivityRow[] = [];
         const initialLoad = artifactSignature === "";
@@ -2328,7 +2335,7 @@ async function main(): Promise<void> {
                 ...liveRow(session),
               ],
         );
-      } else if (view.artifact === "trace") {
+      } else if (artifact === "trace") {
         let activities = parseTraceActivities(content);
         const fullUpdate = latestAgentUpdate(eventContent);
         if (fullUpdate) {
@@ -2366,7 +2373,7 @@ async function main(): Promise<void> {
                 ...liveRow(session),
               ],
         );
-      } else if (view.artifact === "output") {
+      } else if (artifact === "output") {
         const output = visibleArtifactTail(content, OUTPUT_HISTORY_LINES);
         const rows = output
           ? output.split("\n").map((line, index) => ({
@@ -2386,9 +2393,9 @@ async function main(): Promise<void> {
         const current = await diffView.load(
           session,
           diffResult,
-          () => session.stateDir === view.selectedStateDir,
+          readIsCurrent,
         );
-        if (!current) return;
+        if (!current || !readIsCurrent()) return;
         setArtifactRows(diffView.buildRows());
       }
     }
@@ -2989,6 +2996,7 @@ async function main(): Promise<void> {
     function shutdown(): Promise<void> {
       if (shutdownPromise) return shutdownPromise;
       shutdownPromise = (async () => {
+        artifactReads.stop();
         clearInterval(refreshTimer);
         clearInterval(animationTimer);
         if (statusTimer) clearTimeout(statusTimer);

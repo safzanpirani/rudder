@@ -664,6 +664,22 @@ export function statusTimeoutMs(kind: StatusKind): number {
   return kind === "error" || kind === "warning" ? 12_000 : 6_000;
 }
 
+// Each asynchronous read owns a validity check. New reads and shutdown retire it.
+export class LatestRead {
+  private generation = 0;
+  private stopped = false;
+
+  begin(): () => boolean {
+    const generation = ++this.generation;
+    return () => !this.stopped && generation === this.generation;
+  }
+
+  stop(): void {
+    this.stopped = true;
+    this.generation++;
+  }
+}
+
 export class AsyncTaskGate {
   private active?: Promise<void>;
   private stopping = false;
